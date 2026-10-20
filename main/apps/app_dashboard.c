@@ -121,6 +121,13 @@ static int64_t s_clock_poll_ms;
 typedef struct { EpdRect cards[2]; EpdRect stats; EpdRect clockrow; } home_layout_t;
 static home_layout_t s_layout;
 
+/* 随心记双态区（用户 2026-10-20）：继续阅读区下滑切为最近便签预览，再滑/上滑切回；
+ * 状态会话内保持；点击进入便签应用。 */
+static bool s_home_notes;
+static EpdRect s_notes_zone;
+static char s_note_line[160];
+static char s_note_date[40];
+
 static home_book_t *book_at(int index);
 
 static bool date_now(struct tm *out) {
@@ -133,6 +140,34 @@ static bool date_now(struct tm *out) {
     now += 8 * 3600;
     gmtime_r(&now, out);
     return true;
+}
+
+/* 最近一条便签（/sdcard/notes 名字倒序第一个）供首页随心记预览。 */
+static void load_home_note(void) {
+    s_note_line[0] = 0; s_note_date[0] = 0;
+    DIR *d = opendir("/sdcard/notes");
+    if (!d) return;
+    char best[96] = {0};
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        size_t n = strlen(e->d_name);
+        if (e->d_name[0] != '.' && n > 4 && !strcmp(e->d_name + n - 4, ".txt") &&
+            (!best[0] || strcmp(e->d_name, best) > 0))
+            snprintf(best, sizeof(best), "%s", e->d_name);
+    }
+    closedir(d);
+    if (!best[0]) return;
+    char path[160];
+    snprintf(path, sizeof(path), "/sdcard/notes/%s", best);
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    size_t got = fread(s_note_line, 1, sizeof(s_note_line) - 1, f);
+    fclose(f);
+    s_note_line[got] = 0;
+    for (char *p = s_note_line; *p; ++p) if (*p == '\n' || *p == '\r') *p = ' ';
+    if (strlen(best) >= 20)
+        snprintf(s_note_date, sizeof(s_note_date), "最近便签 %.2s-%.2s %.2s:%.2s",
+                 best + 11, best + 13, best + 16, best + 18);
 }
 
 /* 双书卡排序：合并 s_current + s_recent，按最近阅读时间取前两名；
@@ -1059,14 +1094,43 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         return;
     }
     draw_clockrow(fb);
-    /* 2026-10-17：各区域间隙统一（≈44px 节奏）：时钟→标签→书卡→标签→数据卡。 */
-    int y = draw_tag(fb, 320, "继续阅读", true);
-    int card_w = (684 - 2 * NX_MARGIN - HOME_CARD_GAP) / 2;
-    for (int i = 0; i < 2; ++i) {
-        EpdRect card = {NX_MARGIN + (card_w + HOME_CARD_GAP) * i, y, card_w, HOME_CARD_H};
-        s_layout.cards[i] = card;
-        draw_home_card(fb, card, s_card_books[i], i == 0);
+    /* 2026-10-17：各区域间隙统一（≈44px 节奏）。v8（用户 2026-10-20）：本区双态
+     * ——继续阅读 / 随心记（最近便签预览），区内下滑切换、再滑/上滑切回。 */
+    int y = draw_tag(fb, 320, s_home_notes ? "随心记" : "继续阅读", true);
+    if (s_home_notes) {
+        EpdRect card = {NX_MARGIN, y, 684 - 2 * NX_MARGIN, HOME_CARD_H};
+        ui_fill_round_rect(fb, card, NX_R_CARD, NX8_PAPER);
+        ui_draw_control_frame(fb, card, NX_R_CARD, NX8_INK);
+        const char *p = s_note_line;
+        int line_y = card.y + 60;
+        for (int row = 0; row < 5 && *p; ++row) {
+            char line[112];
+            size_t use = 0;
+            while (*p && use + 4 < sizeof(line)) {
+                size_t len = ((unsigned char)*p & 0x80) ? ((unsigned char)*p & 0xe0) == 0xc0 ? 2
+                           : ((unsigned char)*p & 0xf0) == 0xe0 ? 3 : 4 : 1;
+                memcpy(line + use, p, len); use += len; line[use] = 0; p += len;
+                if (ttf_text_width_px(ui_text_effective_px(30), line) > card.width - 96) { use -= len; p -= len; break; }
+            }
+            line[use] = 0;
+            ui_text_vc(fb, card.x + 48, line_y, 30, line, EPD_DRAW_ALIGN_LEFT, false);
+            line_y += 52;
+        }
+        if (!s_note_line[0])
+            ui_text_vc(fb, card.x + 48, card.y + 60, 30, "还没有便签，点击这里新建", EPD_DRAW_ALIGN_LEFT, false);
+        if (s_note_date[0])
+            ui_text_vc(fb, card.x + 48, card.y + HOME_CARD_H - 40, 20, s_note_date, EPD_DRAW_ALIGN_LEFT, false);
+        ui_text_vc(fb, card.x + card.width - 48, card.y + HOME_CARD_H - 40, 18,
+                   "点击进入 · 再滑切回阅读", EPD_DRAW_ALIGN_RIGHT, false);
+    } else {
+        int card_w = (684 - 2 * NX_MARGIN - HOME_CARD_GAP) / 2;
+        for (int i = 0; i < 2; ++i) {
+            EpdRect card = {NX_MARGIN + (card_w + HOME_CARD_GAP) * i, y, card_w, HOME_CARD_H};
+            s_layout.cards[i] = card;
+            draw_home_card(fb, card, s_card_books[i], i == 0);
+        }
     }
+    s_notes_zone = (EpdRect){0, 320, 684, y - 320 + HOME_CARD_H};
     y = draw_tag(fb, y + HOME_CARD_H + 44, "阅读数据", true);
     s_layout.stats = (EpdRect){NX_MARGIN, y, 684 - 2 * NX_MARGIN, 230};
     draw_stats(fb);
@@ -1110,6 +1174,7 @@ static void on_enter(app_ctx_t *ctx) {
     const uint32_t progress_revision = book_progress_revision();
     s_home_force_full_once = app_settings_home_full_refresh();
     refresh_stats();
+    load_home_note();
     struct tm now_bj = {0};
     if (date_now(&now_bj)) { s_last_min = now_bj.tm_min; s_last_day = now_bj.tm_mday; }
     else { s_last_min = -1; s_last_day = -1; }
@@ -1143,6 +1208,7 @@ static void on_enter(app_ctx_t *ctx) {
 static void on_media_lost(app_ctx_t *ctx) {
     (void)ctx;
     clear_cover_cache();
+    s_note_line[0] = 0; s_note_date[0] = 0;
     memset(&s_current, 0, sizeof(s_current));
     memset(s_recent, 0, sizeof(s_recent));
     s_card_books[0] = s_card_books[1] = NULL;
@@ -1251,10 +1317,25 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
         ui_nav_request(ctx, 1);
         return APP_REDRAW_NONE;
     }
+    /* v8：随心记双态切换——区内下滑进入、再下滑/上滑切回；面板/设置页展开时不抢。 */
+    if (!s_wx_setup && !s_goal_open &&
+        (ev->type == UI_GESTURE_SWIPE_D || ev->type == UI_GESTURE_SWIPE_U) &&
+        s_notes_zone.width && ui_rect_hit(s_notes_zone, ev->x0, ev->y0)) {
+        if (!s_home_notes && ev->type == UI_GESTURE_SWIPE_D) { s_home_notes = true; return APP_REDRAW_PAGE; }
+        if (s_home_notes) { s_home_notes = false; return APP_REDRAW_PAGE; }
+        return APP_REDRAW_NONE;
+    }
     if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
     /* v6：阅读数据面板恢复导航栏，导航带命中放开（点击切页离开面板自动收尾）；天气设置页保留。 */
     int tab = ui_nav_hit(ev->x0, ev->y0);
     if (tab >= 0) { ui_nav_request(ctx, tab); return APP_REDRAW_NONE; }
+    /* v8：随心记态点击本区进入便签应用。 */
+    if (s_home_notes && !s_wx_setup && !s_goal_open &&
+        s_notes_zone.width && ui_rect_hit(s_notes_zone, ev->x0, ev->y0)) {
+        extern const app_desc_t app_notes;
+        ctx->request_app = &app_notes;
+        return APP_REDRAW_NONE;
+    }
     if (s_wx_setup) return wx_setup_gesture(ctx, ev);
     if (s_goal_open) {
         /* 换月箭头 */

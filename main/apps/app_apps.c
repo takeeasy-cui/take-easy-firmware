@@ -39,9 +39,11 @@ static const app_desc_t* page_calc(void) { return app_at(5); }
 extern const app_desc_t app_avgr;
 extern const app_desc_t app_gtext;
 extern const app_desc_t app_gbbk;
+extern const app_desc_t app_notes;
 static const app_desc_t* page_avgr(void)   { return &app_avgr; }
 static const app_desc_t* page_gtext(void) { return &app_gtext; }
 static const app_desc_t* page_gbbk(void)  { return &app_gbbk; }
+static const app_desc_t* page_notes(void) { return &app_notes; }
 static const app_desc_t* page_transfer(void) {
     extern const app_desc_t app_transfer;
     return &app_transfer;
@@ -116,10 +118,22 @@ static void icon_gbbk(uint8_t* fb, int cx, int cy, uint8_t ink) {
     nothing_thick_line(fb, cx - 17, cy + 19, cx + 17, cy + 19, 5, ink);
 }
 
-static const apps_entry_t k_entries[6] = {
+static void icon_notes(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 便签：圆角卡描边 + 两行内容线 + 右下铅笔斜置（新增/编辑语义）。 */
+    EpdRect body = {cx - 17, cy - 20, 34, 40};
+    ui_draw_round_rect(fb, body, 6, ink);
+    ui_draw_round_rect(fb, (EpdRect){body.x + 1, body.y + 1, body.width - 2, body.height - 2}, 5, ink);
+    nothing_thick_line(fb, cx - 11, cy - 9, cx + 10, cy - 9, 4, ink);
+    nothing_thick_line(fb, cx - 11, cy - 1, cx + 4, cy - 1, 4, ink);
+    nothing_thick_line(fb, cx + 6, cy + 1, cx + 13, cy + 8, 4, ink);
+    nothing_thick_line(fb, cx - 11, cy + 7, cx - 2, cy + 7, 4, ink);
+}
+
+static const apps_entry_t k_entries[7] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
     {"计算器", icon_calc, page_calc, true},
+    {"便签", icon_notes, page_notes, true},
     {"推理游戏", icon_avgr, page_avgr, true},
     {"文字游戏", icon_gtext, page_gtext, true},
     {"步步高游戏", icon_gbbk, page_gbbk, true},

@@ -105,6 +105,7 @@ idf_component_register(
         "apps/app_dashboard.c"
         "apps/app_apps.c"
         "apps/app_calc.c"
+        "apps/app_notes.c"
         "apps/app_weread.c"
         "apps/app_files.c"
         "apps/file_tree.c"
