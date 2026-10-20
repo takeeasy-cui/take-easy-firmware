@@ -96,6 +96,9 @@ void app_settings_set_clock_widget(uint8_t type);
 /// 自定义图片（widget 3）文件名，TF 卡根目录（21f2 补选择步骤）；空串=homepic.png。
 const char *app_settings_clock_pic(void);
 void app_settings_set_clock_pic(const char *name);
+/// 键盘键位布局（21g，NVS kb_lay）：0=26 全拼 1=14 2=18 3=九宫格（YanReader 直移植）。
+uint8_t app_settings_kb_layout(void);
+void app_settings_set_kb_layout(uint8_t layout);
 /// 自定义文字（widget 4）内容，最长 8 汉字（21f2：两行大字，原 24 字改）；空串=未设置。
 const char *app_settings_clock_text(void);
 void app_settings_set_clock_text(const char *text);

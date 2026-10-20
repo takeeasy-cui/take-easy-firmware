@@ -55,6 +55,7 @@
 #define NVS_KEY_CLOCK_WIDGET "wx_zone"
 #define NVS_KEY_CLOCK_TEXT   "wx_text"
 #define NVS_KEY_CLOCK_PIC   "wx_pic"   /* 21f2：自定义图片文件名（TF 卡根目录） */
+#define NVS_KEY_KB_LAYOUT   "kb_lay"   /* 21g：键位布局 0=26 1=14 2=18 3=九宫格 */
 #define NVS_KEY_FONT "font"
 #define NVS_KEY_SYS_FONT "sys_font"
 #define NVS_KEY_SYS_SIZE "sys_size"
@@ -145,6 +146,7 @@ static uint8_t s_muyu_snd = 1;          /* 木鱼音效（21g 瘦身为 0..3，�
 static uint8_t s_clock_widget;          /* 首页时钟行右组：0=天气 1=黄历 2=木鱼 3=图片 4=文字 */
 static char s_clock_text[72];           /* 自定义文字（widget 4）*/
 static char s_clock_pic[80];            /* 自定义图片文件名（widget 3，TF 卡根目录；空=homepic.png）*/
+static uint8_t s_kb_layout;             /* 21g：键盘键位布局（YanReader 直移植，0..3）*/
 static bool s_reader_hide_images;
 static bool s_reader_hold_refresh;
 static const char *s_reader_key_names[] = {"rd_key_l", "rd_key_m", "rd_key_r"};
@@ -272,6 +274,8 @@ void app_settings_init(void) {
         if (nvs_get_str(h, NVS_KEY_CLOCK_TEXT, s_clock_text, &ztext_len) != ESP_OK) s_clock_text[0] = 0;
         size_t zpic_len = sizeof(s_clock_pic);
         if (nvs_get_str(h, NVS_KEY_CLOCK_PIC, s_clock_pic, &zpic_len) != ESP_OK) s_clock_pic[0] = 0;
+        uint8_t kbl = 0;
+        if (nvs_get_u8(h, NVS_KEY_KB_LAYOUT, &kbl) == ESP_OK && kbl <= 3) s_kb_layout = kbl;
     }
     for (int ti = 0; ti < 3; ++ti) {
         char tkey[8]; snprintf(tkey, sizeof(tkey), "todo%d", ti + 1);
@@ -983,6 +987,13 @@ void app_settings_set_clock_pic(const char *name) {
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     if (nvs_set_str(h, NVS_KEY_CLOCK_PIC, s_clock_pic) == ESP_OK) (void)nvs_commit(h);
     nvs_close(h);
+}
+/* ---- 键盘键位布局（21g：YanReader editor_vk 直移植，26/14/18/九宫格）---- */
+uint8_t app_settings_kb_layout(void) { return s_kb_layout; }
+void app_settings_set_kb_layout(uint8_t layout) {
+    if (layout > 3 || layout == s_kb_layout) return;
+    s_kb_layout = layout;
+    nvs_put_u8(NVS_KEY_KB_LAYOUT, layout);
 }
 void app_settings_set_shelf_style(uint8_t style) {
     if (style < 1 || style > 5) return;

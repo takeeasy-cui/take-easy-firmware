@@ -100,6 +100,25 @@ int ime_glue_ambig_syllable(int idx, char *buf, size_t cap) {
 bool ime_glue_ambig_select(int idx) { return engine().selectAmbigCode(idx); }
 bool ime_glue_ambig_active(void) { return engine().ambigActive(); }
 
+/* ---- 21g：YanReader editor_vk 直移植所需（键盘 UI 直接读引擎布局表/宫格状态） ---- */
+int ime_glue_ambig_layout_count(void) { return IME::ambigLayoutCount(); }
+int ime_glue_ambig_row_keys(int row) { return IME::ambigRowKeys(row); }
+int ime_glue_ambig_row_cols(int row) { return IME::ambigRowCols(row); }
+int ime_glue_ambig_row_group(int row, int k) { return IME::ambigRowGroup(row, k); }
+void ime_glue_ambig_group_letters(int group, char *buf, size_t cap) {
+    if (!buf || !cap) return;
+    snprintf(buf, cap, "%s", IME::ambigGroupLetters(group));
+}
+void ime_glue_ambig_group_label(int group, char *buf, size_t cap) {
+    if (!buf || !cap) return;
+    snprintf(buf, cap, "%s", IME::ambigGroupLabel(group));
+}
+int ime_glue_highlight_idx(void) { return engine().highlightIdx(); }
+int ime_glue_page_size(void) { return engine().pageSize(); }
+void ime_glue_grid_paging(bool on) { engine().setGridPaging(on); }
+void ime_glue_cancel_composition(void) { engine().cancelComposition(); }
+void ime_glue_ambig_commit_syllable(void) { (void)engine().ambigCommitSyllable(); }
+
 const char *ime_glue_status(void) {
     static char status[96];
     status[0] = 0;

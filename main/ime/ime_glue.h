@@ -60,6 +60,23 @@ int ime_glue_page_total(void);
 int ime_glue_ambig_syllable(int idx, char *buf, size_t cap);
 bool ime_glue_ambig_select(int idx);
 bool ime_glue_ambig_active(void);
+
+/* ---- 21g：YanReader editor_vk 直移植所需（键盘 UI 直接读引擎布局表/宫格状态） ---- */
+/// 布局数（4）与行布局表：键位组绘制/命中共用（IME::ambigRow* 静态方法）。
+int ime_glue_ambig_layout_count(void);
+int ime_glue_ambig_row_keys(int row);
+int ime_glue_ambig_row_cols(int row);
+int ime_glue_ambig_row_group(int row, int k);
+void ime_glue_ambig_group_letters(int group, char *buf, size_t cap);
+void ime_glue_ambig_group_label(int group, char *buf, size_t cap);
+/// 当前候选高亮下标（无高亮 -1）与每页候选数。
+int ime_glue_highlight_idx(void);
+int ime_glue_page_size(void);
+/// T9 候选宫格分页：开=固定每页 9 个（引擎 setGridPaging）。
+void ime_glue_grid_paging(bool on);
+/// 清当前拼音组合（九宫格「重输」，不动正文）与「1 分词」确定下一音节。
+void ime_glue_cancel_composition(void);
+void ime_glue_ambig_commit_syllable(void);
 /// 引擎状态消息（一次性取出，空串=无）。
 const char *ime_glue_status(void);
 
