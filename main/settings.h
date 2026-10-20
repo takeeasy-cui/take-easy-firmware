@@ -81,6 +81,13 @@ esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk);
 /* ---- 木鱼功德计数（累计，长按可重置）---- */
 uint32_t app_settings_muyu_count(void);
 void app_settings_set_muyu_count(uint32_t count);
+/* ---- 首页时钟行右组 widget（用户 2026-10-20 第二十一批 e 段，五选一）----
+ * 0=天气 1=老黄历宜忌 2=木鱼 3=自定义图片(/sdcard/homepic.png) 4=自定义文字。 */
+uint8_t app_settings_clock_widget(void);
+void app_settings_set_clock_widget(uint8_t type);
+/// 自定义文字（widget 4）内容，最长 24 汉字；空串=未设置。
+const char *app_settings_clock_text(void);
+void app_settings_set_clock_text(const char *text);
 /// 空路径表示固件内建字体；非空为 SD 上的 TTF。/ Empty path is the built-in font; non-empty is a TTF on the SD card.
 const char* app_settings_font_path(void);
 void app_settings_set_font_path(const char* path);

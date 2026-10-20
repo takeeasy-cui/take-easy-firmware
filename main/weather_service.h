@@ -38,6 +38,19 @@ typedef enum {
     WEATHER_SRC_TF,            /* TF 卡 weather.txt（默认源） / default source */
 } weather_config_source_t;
 
+/* 数据服务商（用户 2026-10-20 第二十一批 e 段，三源可选）：
+ * 心知=城市名+私钥；和风=城市名+key（GeoAPI 自动查地点 ID）；彩云=经纬度+令牌。 */
+typedef enum {
+    WEATHER_PROVIDER_SENIVERSE = 0,   /* 心知天气 v3（默认） */
+    WEATHER_PROVIDER_QWEATHER = 1,   /* 和风天气 v7 */
+    WEATHER_PROVIDER_CAIYUN = 2,      /* 彩云天气 v2.6（地点填经纬度，如 116.41,39.9） */
+} weather_provider_t;
+
+/// 当前数据服务商（默认心知；NVS "prov"，TF weather.txt 的 prov= 行亦可）。
+weather_provider_t weather_config_provider(void);
+/// 只切换服务商（地点/Key 不动）：写 NVS 并清缓存退避，下次联网即按新源抓取。
+esp_err_t weather_config_save_provider(weather_provider_t p);
+
 /// 当前生效配置源（设置页标注用）。
 weather_config_source_t weather_config_source(void);
 /// 读取当前生效配置（地点与 Key；NVS 优先，回退 TF 卡）；返回是否有任一字段。

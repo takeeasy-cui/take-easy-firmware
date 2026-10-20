@@ -43,6 +43,7 @@
 #include "display_main_waveform.h"
 #include "e0470_epaper_waveform.h"
 #include "esp_heap_caps.h"
+#include "read_pico_buzzer.h"
 #include "read_pico_pmu.h"
 #include "read_pico_sd.h"
 #include "read_pico_transfer.h"
@@ -473,6 +474,141 @@ static void draw_cover(uint8_t *fb, const home_book_t *item, EpdRect bounds) {
  * 美观：图标 120→96 与文字成视觉组（120 时文字只能吊在组外，松散）；组间留白≥40px。
  * 刷新：左右分区互不交叠——分钟翻转只刷左侧时间条（日期/图标不变不重刷），
  * 天气完成只刷右组条带；局部刷新面积最小化（DU 提速+功耗）。 */
+/* ============ 时钟行右组 widget（v9，用户 2026-10-20 第二十一批 e 段）============
+ * 五选一：0=天气 1=老黄历宜忌 2=木鱼 3=自定义图片 4=自定义文字。
+ * 手势：点击按类型分派（天气=设置页、木鱼=敲一下）；长按任意态=组件选项页。 */
+/* 老黄历宜忌文本在面板区（后文）定义，此处前向声明。 */
+static void goal_almanac_chars_two(char *gz, char *lunar, char *yi, char *ji,
+                                   int sy, int sm, int sd);
+/* 自定义图片缓存（v9）：懒解码一次（gray+alpha 双平面 120×150，PSRAM）。 */
+static uint8_t *s_wx_img;
+static bool s_wx_img_ok;
+
+static void wx_fit_text(char *dst, size_t cap, const char *src, int px, int max_w) {
+    snprintf(dst, cap, "%s", src);
+    while (dst[0] && ttf_text_width_px(ui_text_effective_px(px), dst) > max_w) {
+        size_t n = strlen(dst) - 1;
+        while (n && ((unsigned char)dst[n] & 0xc0) == 0x80) --n;
+        dst[n] = 0;
+    }
+}
+
+static void draw_wx_weather(uint8_t* fb) {
+    /* 图标 96px 居中 y 122..218；地点 22px（用户拍板加大）中心 246；高低温 15px 中中心 272。 */
+    weather_code_t wxcode = weather_valid() ? weather_code() : WEATHER_CODE_SUNNY;
+    nothing_draw_weather(fb, 517, 122, 96, wxcode);
+    char city[48];
+    weather_city(city, sizeof(city));
+    if (city[0]) {
+        char fit[64];
+        wx_fit_text(fit, sizeof(fit), city, 22, 116);
+        ui_text_vc(fb, 625, 246, 22, fit, EPD_DRAW_ALIGN_RIGHT, false);
+    }
+    if (weather_valid()) {
+        char range[24];
+        snprintf(range, sizeof(range), "%d° / %d°", weather_low(), weather_high());
+        ui_text_vc(fb, 625, 272, 15, range, EPD_DRAW_ALIGN_RIGHT, false);
+    }
+}
+
+static void draw_wx_almanac(uint8_t* fb, bool ok, const struct tm* tm_bj) {
+    /* 宜/忌两行：徽章 r12 + 条目 16px（限宽 84px 截断）。 */
+    if (!ok) { ui_text_vc(fb, 565, 196, 22, "老黄历", EPD_DRAW_ALIGN_CENTER, false); return; }
+    char gz[32], lunar[48], yi[64], ji[64];
+    goal_almanac_chars_two(gz, lunar, yi, ji,
+                           tm_bj->tm_year + 1900, tm_bj->tm_mon + 1, tm_bj->tm_mday);
+    char fit[80];
+    epd_fill_circle(521, 162, 12, NX8_INK, fb);
+    ui_text_vc(fb, 521, 162, 14, "宜", EPD_DRAW_ALIGN_CENTER, true);
+    wx_fit_text(fit, sizeof(fit), yi, 16, 84);
+    ui_text_vc(fb, 541, 162, 16, fit, EPD_DRAW_ALIGN_LEFT, false);
+    epd_draw_circle(521, 232, 12, NX8_INK, fb);
+    epd_draw_circle(521, 232, 11, NX8_INK, fb);
+    ui_text_vc(fb, 521, 232, 14, "忌", EPD_DRAW_ALIGN_CENTER, false);
+    wx_fit_text(fit, sizeof(fit), ji, 16, 84);
+    ui_text_vc(fb, 541, 232, 16, fit, EPD_DRAW_ALIGN_LEFT, false);
+}
+
+static void draw_wx_muyu(uint8_t* fb) {
+    /* 小木鱼（圆身+开口+槌）+ 点阵功德数（与 app 同源计数）。 */
+    const int cx = 548, cy = 178;
+    epd_draw_circle(cx, cy, 27, NX8_INK, fb);
+    epd_draw_circle(cx, cy, 26, NX8_INK, fb);
+    ui_fill_rect_fast((EpdRect){cx + 14, cy - 18, 16, 36}, 0xf0, fb);
+    nothing_thick_line(fb, cx + 14, cy - 18, cx + 14, cy + 18, 2, NX8_INK);
+    epd_fill_circle(cx - 7, cy - 16, 4, NX8_INK, fb);
+    nothing_thick_line(fb, cx + 24, cy + 22, cx + 38, cy + 30, 6, NX8_INK);
+    epd_fill_circle(cx + 40, cy + 31, 8, NX8_INK, fb);
+    uint32_t c = app_settings_muyu_count();
+    if (c > 99999) c = 99999;
+    char cs[12];
+    snprintf(cs, sizeof(cs), "%u", (unsigned)c);
+    const int pitch = 8, dr = 3;
+    int w = nothing_dot_text_w(cs, pitch);
+    nothing_dot_text(fb, 565 - w / 2, 248, cs, dr, pitch, NX8_INK);
+}
+
+static void wx_img_load(void) {
+    /* 懒解码一次（gray+alpha 双平面 120×150，PSRAM）；卡重挂载后失效重读。 */
+    if (s_wx_img_ok) return;
+    if (!s_wx_img) s_wx_img = heap_caps_malloc((size_t)120 * 150 * 2, MALLOC_CAP_SPIRAM);
+    if (!s_wx_img) return;
+    s_wx_img_ok = book_image_file_cover_layer("/sdcard/homepic.png", 120, 150,
+                                              s_wx_img, s_wx_img + (size_t)120 * 150);
+}
+
+static void draw_wx_image(uint8_t* fb) {
+    wx_img_load();
+    if (!s_wx_img_ok) {
+        ui_text_vc(fb, 565, 172, 18, "放一张 PNG 到", EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 565, 218, 15, "/sdcard/homepic.png", EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 565, 258, 13, "透明处透出底色", EPD_DRAW_ALIGN_CENTER, false);
+        return;
+    }
+    const uint8_t *gray = s_wx_img, *alpha = s_wx_img + (size_t)120 * 150;
+    for (int y = 0; y < 150; ++y) {
+        for (int x = 0; x < 120; ++x) {
+            const size_t i = (size_t)y * 120 + x;
+            const uint8_t a = alpha[i];
+            if (!a) continue;
+            const int px = 505 + x, py = 118 + y;
+            if (a >= 250) { epd_draw_pixel(px, py, gray[i], fb); continue; }
+            const uint8_t byte = fb[(size_t)py * 684 / 2 + px / 2];
+            const uint8_t base = (px & 1) ? (byte & 0x0f) : ((byte & 0xf0) >> 4);
+            const uint8_t v = (uint8_t)((gray[i] * (uint32_t)a + base * (255u - a) + 127) / 255);
+            epd_draw_pixel(px, py, v, fb);
+        }
+    }
+}
+
+static void draw_wx_text(uint8_t* fb) {
+    /* 自定义文字两行 24px 居中；按宽度截断到 116px（约 4 字/行）。 */
+    const char *t = app_settings_clock_text();
+    if (!t[0]) { ui_text_vc(fb, 565, 196, 16, "长按设置文字", EPD_DRAW_ALIGN_CENTER, false); return; }
+    char line1[40] = {0}, line2[40] = {0};
+    const char *p = t;
+    for (int line = 0; line < 2; ++line) {
+        char *dst = line ? line2 : line1;
+        size_t used = 0;
+        while (*p && used + 4 <= sizeof(line1) - 1) {
+            size_t ch = 1;
+            while ((p[ch] & 0xc0) == 0x80) ++ch;
+            memcpy(dst + used, p, ch);
+            used += ch;
+            p += ch;
+            if (ttf_text_width_px(ui_text_effective_px(24), dst) > 116) {
+                /* 当前行再加一个字就超宽：回退这个字并收行。 */
+                used -= ch;
+                dst[used] = 0;
+                break;
+            }
+        }
+        dst[used] = 0;
+    }
+    ui_text_vc(fb, 565, line2[0] ? 168 : 196, 24, line1, EPD_DRAW_ALIGN_CENTER, false);
+    if (line2[0]) ui_text_vc(fb, 565, 222, 24, line2, EPD_DRAW_ALIGN_CENTER, false);
+}
+
 static void draw_clockrow(uint8_t* fb) {
     time_t now = time(NULL);
     char clock[8] = "12:00";
@@ -495,20 +631,13 @@ static void draw_clockrow(uint8_t* fb) {
     } else {
         ui_text_vc(fb, 59, 268, 22, "--月--日", EPD_DRAW_ALIGN_LEFT, false);
     }
-    /* 右组（x 505..625，120 宽）：图标 96px 居中 y 122..218；地点 16px 中心 238；
-     * 高/低温 14px 中心 262 右对齐 x625。组底距行底 290 留 14px 呼吸。
-     * 图标按实际天气码绘制（weather_service，未知回退太阳）。 */
-    weather_code_t wxcode = weather_valid() ? weather_code() : WEATHER_CODE_SUNNY;
-    nothing_draw_weather(fb, 517, 122, 96, wxcode);
-    /* v6（2026-10-19 真机反馈“设置完地点不在首页显示”）：即使天气数据未就绪
-     * （离线/未联网），也显示当前配置的地点名；高低温仅在有数据时显示。 */
-    char city[48];
-    weather_city(city, sizeof(city));
-    if (city[0]) ui_text_vc(fb, 625, 238, 16, city, EPD_DRAW_ALIGN_RIGHT, false);
-    if (weather_valid()) {
-        char range[24];
-        snprintf(range, sizeof(range), "%d° / %d°", weather_low(), weather_high());
-        ui_text_vc(fb, 625, 262, 14, range, EPD_DRAW_ALIGN_RIGHT, false);
+    /* 右组（x 505..625）五选一 widget（v9，2026-10-20）：天气/老黄历/木鱼/图片/文字。 */
+    switch (app_settings_clock_widget()) {
+        case 1: draw_wx_almanac(fb, valid, &tm_bj); break;
+        case 2: draw_wx_muyu(fb); break;
+        case 3: draw_wx_image(fb); break;
+        case 4: draw_wx_text(fb); break;
+        default: draw_wx_weather(fb); break;
     }
 }
 
@@ -638,13 +767,16 @@ static int s_goal_sel_day;   /* 2026-10-17：0=今天；>0=当前显示月份第
  * 默认显示当前生效源的值（NVS 优先、回退 TF 卡 weather.txt），可改；
  * 保存写入 NVS（此后优先）；「恢复默认源」清除 NVS 回退 TF 卡。 */
 static bool s_wx_setup;
-static int s_wx_edit = -1;      /* -1=未编辑；0=地点；1=Key */
+static int s_wx_edit = -1;      /* -1=未编辑；0=地点；1=Key；2=组件文字 */
 static char s_wx_city[48];
 static char s_wx_key[40];
 static ui_text_edit_t s_wx_input;
 static char s_wx_notice[96];
 static EpdRect s_wx_area;       /* 键盘局部刷新区 */
 static bool s_wx_layout, s_wx_settle;
+/* v9（第二十一批 e 段，2026-10-20）：时钟行右组五选一 widget。 */
+static bool s_wx_pick;                  /* 组件选项页 */
+static char s_wx_zone_text[72];        /* 自定义文字编辑缓冲 */
 
 /* v3 布局：月历置顶 96..716 → 老黄历上卡 728..852（历法：农历40+干支26）
  * → 老黄历下卡 858..990（宜/忌，徽章r17/条30）→ 目标行 1000..1084（H84）。
@@ -948,6 +1080,66 @@ static void wx_row_card(uint8_t *fb, EpdRect box, const char *label,
     ui_text_vc(fb, box.x + 24, box.y + 74, 16, hint, EPD_DRAW_ALIGN_LEFT, false);
 }
 
+static void wx_edit_begin(app_ctx_t *ctx, int field);   /* 组件文字编辑复用（后文定义）。 */
+
+static void render_wx_pick(uint8_t *fb) {
+    /* 组件选项页（v9，2026-10-20）：时钟行右组五选一；当前类型选中加环。 */
+    ui_clear_page(fb);
+    epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
+    ui_nav_status(fb);
+    ui_text_vc(fb, 342, 106, 34, "首页组件", EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 342, 150, 18, "时钟行右侧显示内容（长按首页右组也可打开）", EPD_DRAW_ALIGN_CENTER, false);
+    typedef struct { const char *name, *hint; } pick_t;
+    static const pick_t k_picks[5] = {
+        {"天气", "图标 + 地点 + 高低温"},
+        {"老黄历", "今日宜 / 忌"},
+        {"木鱼", "点击敲一下，功德 +1"},
+        {"自定义图片", "TF 卡 /sdcard/homepic.png"},
+        {"自定义文字", "两行，最多 24 字"},
+    };
+    uint8_t cur = app_settings_clock_widget();
+    for (int i = 0; i < 4; ++i) {
+        EpdRect card = {i % 2 == 0 ? 36 : 352, 190 + (i / 2) * 130, 296, 112};
+        ui_fill_round_rect(fb, card, NX_R_CARD, NX8_PAPER);
+        ui_draw_control_frame(fb, card, NX_R_CARD, NX8_INK);
+        ui_text_vc(fb, card.x + 24, card.y + 38, 24, k_picks[i].name, EPD_DRAW_ALIGN_LEFT, false);
+        ui_text_vc(fb, card.x + 24, card.y + 76, 15, k_picks[i].hint, EPD_DRAW_ALIGN_LEFT, false);
+        if (cur == i) ui_draw_selected_round_rect(fb, card, NX_R_CARD);
+    }
+    EpdRect wide = {36, 450, 612, 112};
+    ui_fill_round_rect(fb, wide, NX_R_CARD, NX8_PAPER);
+    ui_draw_control_frame(fb, wide, NX_R_CARD, NX8_INK);
+    ui_text_vc(fb, wide.x + 24, wide.y + 38, 24, k_picks[4].name, EPD_DRAW_ALIGN_LEFT, false);
+    ui_text_vc(fb, wide.x + 24, wide.y + 76, 15, k_picks[4].hint, EPD_DRAW_ALIGN_LEFT, false);
+    if (cur == 4) ui_draw_selected_round_rect(fb, wide, NX_R_CARD);
+    ui_text_vc(fb, 342, 620, 17, "自定义图片：放一张 PNG 到 TF 卡 /sdcard/homepic.png（透明处透出底色）",
+               EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 342, 652, 17, "自定义文字：选中后进入编辑；右键返回",
+               EPD_DRAW_ALIGN_CENTER, false);
+    ui_nav_draw(fb, 0);
+}
+
+static EpdRect wx_pick_rect(int idx) {
+    if (idx < 4) return (EpdRect){idx % 2 == 0 ? 36 : 352, 190 + (idx / 2) * 130, 296, 112};
+    return (EpdRect){36, 450, 612, 112};
+}
+
+static app_redraw_t wx_pick_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
+    (void)ctx;
+    if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
+    for (int i = 0; i < 5; ++i) {
+        if (!ui_rect_hit(wx_pick_rect(i), ev->x0, ev->y0)) continue;
+        app_settings_set_clock_widget((uint8_t)i);
+        s_wx_pick = false;
+        if (i == 4) {                     /* 文字：选中后直接进入编辑 */
+            wx_edit_begin(ctx, 2);
+            return APP_REDRAW_FULL;
+        }
+        return APP_REDRAW_FULL;           /* 回首页立即看到新组件 */
+    }
+    return APP_REDRAW_NONE;
+}
+
 static void render_wx_setup(uint8_t *fb) {
     ui_clear_page(fb);
     epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
@@ -961,14 +1153,19 @@ static void render_wx_setup(uint8_t *fb) {
     if (cfg_city[0]) snprintf(city, sizeof(city), "%s", cfg_city);
     if (cfg_key[0]) snprintf(key, sizeof(key), "已设置（%u 位）", (unsigned)strlen(cfg_key));
     wx_row_card(fb, wx_row_rect(0), "地点", city, "点击输入，天气按新地址更新", true);
-    wx_row_card(fb, wx_row_rect(1), "Key", key, "心知天气密钥：在 seniverse.com 注册", true);
-    const char *src_text, *src_hint;
-    switch (weather_config_source()) {
-        case WEATHER_SRC_NVS: src_text = "设备设置（NVS）"; src_hint = "点击可直接修改地点"; break;
-        case WEATHER_SRC_TF:  src_text = "TF 卡 weather.txt"; src_hint = "/sdcard/weather.txt 内 city=/key= 两行"; break;
-        default:              src_text = "未配置"; src_hint = "设置后自动回写到设备，联网更新"; break;
-    }
-    wx_row_card(fb, wx_row_rect(2), "当前源", src_text, src_hint, true);
+    /* Key 行说明按服务商变化（v9，三源）。 */
+    weather_provider_t prov = weather_config_provider();
+    const char *key_hint = prov == WEATHER_PROVIDER_QWEATHER ? "和风 Key：qweather.com 控制台"
+                       : prov == WEATHER_PROVIDER_CAIYUN ? "彩云令牌：caiyunapp.com"
+                                                        : "心知密钥：seniverse.com 注册";
+    wx_row_card(fb, wx_row_rect(1), "Key", key, key_hint, true);
+    /* v9（2026-10-20）：「当前源」→「数据源」三选一（心知/和风/彩云），点击循环切换。 */
+    const char *prov_text = prov == WEATHER_PROVIDER_QWEATHER ? "和风天气"
+                        : prov == WEATHER_PROVIDER_CAIYUN ? "彩云天气" : "心知天气";
+    const char *prov_hint = prov == WEATHER_PROVIDER_QWEATHER ? "点击切换 · 地点填城市名"
+                       : prov == WEATHER_PROVIDER_CAIYUN ? "点击切换 · 地点填经纬度如 116.41,39.9"
+                                                       : "点击切换 · 地点填城市名";
+    wx_row_card(fb, wx_row_rect(2), "数据源", prov_text, prov_hint, true);
     ui_draw_button(fb, wx_reset_rect(), "恢复默认源", false);
     ui_text_vc(fb, 342, wx_reset_rect().y + wx_reset_rect().height + 30, 17,
                "清除设备设置，改用 TF 卡 weather.txt", EPD_DRAW_ALIGN_CENTER, false);
@@ -983,11 +1180,20 @@ static void render_wx_editor(uint8_t *fb) {
     ui_clear_page(fb);
     epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
-    ui_text_vc(fb, 342, 96, 24, s_wx_edit == 0 ? "编辑地点" : "编辑密钥", EPD_DRAW_ALIGN_CENTER, false);
+    const char *title = s_wx_edit == 0 ? "编辑地点" : s_wx_edit == 1 ? "编辑密钥" : "组件文字";
+    ui_text_vc(fb, 342, 96, 24, title, EPD_DRAW_ALIGN_CENTER, false);
     ui_text(fb, 642, 128, 24, "完成", EPD_DRAW_ALIGN_RIGHT, false);
-    ui_text(fb, 36, 160, 21, s_wx_edit == 0 ? "输入地点，天气按新地址更新"
-                                             : "心知天气 API Key（seniverse.com 注册）",
-            EPD_DRAW_ALIGN_LEFT, false);
+    weather_provider_t prov = weather_config_provider();
+    const char *hint = s_wx_edit == 0 ? (prov == WEATHER_PROVIDER_CAIYUN
+                                        ? "地点：经度,纬度（如 116.41,39.9）"
+                                        : "输入地点，天气按新地址更新")
+                  : s_wx_edit == 1 ? (prov == WEATHER_PROVIDER_QWEATHER
+                                      ? "和风天气 Key（qweather.com 控制台）"
+                                      : prov == WEATHER_PROVIDER_CAIYUN
+                                      ? "彩云天气令牌（caiyunapp.com）"
+                                      : "心知天气 API Key（seniverse.com 注册）")
+                  : "两行显示在首页时间旁，最多 24 字";
+    ui_text(fb, 36, 160, 21, hint, EPD_DRAW_ALIGN_LEFT, false);
     ui_text_input_draw(fb, &s_wx_input, (EpdRect){36, 200, 612, 82}, 28, false, NULL);
     if (s_wx_notice[0]) ui_text_fixed_vc(fb, 36, 520, 22, s_wx_notice, EPD_DRAW_ALIGN_LEFT, false);
     ui_keyboard_draw(fb, 694);
@@ -1007,6 +1213,13 @@ static app_redraw_t wx_editor_paint(app_ctx_t *ctx, bool field) {
 static void wx_edit_begin(app_ctx_t *ctx, int field) {
     (void)ctx;
     s_wx_edit = field;
+    if (field == 2) {                       /* v9：组件文字（中文键盘，预填现有文字） */
+        snprintf(s_wx_zone_text, sizeof(s_wx_zone_text), "%s", app_settings_clock_text());
+        ui_text_edit_init(&s_wx_input, s_wx_zone_text, sizeof(s_wx_zone_text));
+        ui_keyboard_begin(&s_wx_input, false);
+        s_wx_notice[0] = 0;
+        return;
+    }
     char city[48] = {0}, key[40] = {0};
     (void)weather_config_get(city, sizeof(city), key, sizeof(key));
     if (field == 0) snprintf(s_wx_city, sizeof(s_wx_city), "%s", city);
@@ -1021,9 +1234,17 @@ static void wx_edit_begin(app_ctx_t *ctx, int field) {
  * v6：先冲刷未上屏组合（点确定/物理键保存路径都带上用户输入，2026-10-19 用户反馈）。 */
 static app_redraw_t wx_save_field(app_ctx_t *ctx) {
     ui_keyboard_commit_pending();
+    int field = s_wx_edit;
+    if (field == 2) {                       /* v9：组件文字：保存后直接回首页看效果。 */
+        app_settings_set_clock_text(s_wx_zone_text);
+        ui_keyboard_end();
+        s_wx_edit = -1;
+        s_wx_pick = false;
+        (void)ctx;
+        return APP_REDRAW_FULL;
+    }
     char city[48] = {0}, key[40] = {0};
     (void)weather_config_get(city, sizeof(city), key, sizeof(key));
-    int field = s_wx_edit;
     if (field == 0) {
         if (!s_wx_city[0]) { snprintf(s_wx_notice, sizeof(s_wx_notice), "地点不能为空"); return APP_REDRAW_PAGE; }
         snprintf(city, sizeof(city), "%s", s_wx_city);
@@ -1067,7 +1288,14 @@ static app_redraw_t wx_setup_gesture(app_ctx_t *ctx, const ui_gesture_event_t *e
     for (int f = 0; f < 2; ++f) {
         if (ui_rect_hit(wx_row_rect(f), ev->x0, ev->y0)) { wx_edit_begin(ctx, f); return APP_REDRAW_FULL; }
     }
-    if (ui_rect_hit(wx_row_rect(2), ev->x0, ev->y0)) { wx_edit_begin(ctx, 0); return APP_REDRAW_FULL; }
+    if (ui_rect_hit(wx_row_rect(2), ev->x0, ev->y0)) {
+        /* v9：数据源三选一，点击循环（心知→和风→彩云）；清缓存退避。 */
+        weather_provider_t next = (weather_provider_t)(((int)weather_config_provider() + 1) % 3);
+        esp_err_t err = weather_config_save_provider(next);
+        snprintf(s_wx_notice, sizeof(s_wx_notice),
+                 err == ESP_OK ? "已切换数据源，联网后按新源更新" : "切换失败，请重试");
+        return APP_REDRAW_FULL;
+    }
     if (ui_rect_hit(wx_reset_rect(), ev->x0, ev->y0)) {
         esp_err_t err = weather_config_reset();
         snprintf(s_wx_notice, sizeof(s_wx_notice),
@@ -1082,8 +1310,12 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
     ui_clear_page(fb);
     epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
-    if (s_wx_edit >= 0) {          /* 天气编辑优先；键盘覆盖导航区，不画导航 */
+    if (s_wx_edit >= 0) {          /* 天气/组件文字编辑优先；键盘覆盖导航区，不画导航 */
         render_wx_editor(fb);
+        return;
+    }
+    if (s_wx_pick) {                /* v9：组件五选一选项页 */
+        render_wx_pick(fb);
         return;
     }
     if (s_wx_setup) {
@@ -1210,6 +1442,7 @@ static void on_enter(app_ctx_t *ctx) {
 static void on_media_lost(app_ctx_t *ctx) {
     (void)ctx;
     clear_cover_cache();
+    s_wx_img_ok = false;               /* v9：自定义图片随卡失效重读 */
     s_note_line[0] = 0; s_note_date[0] = 0;
     memset(&s_current, 0, sizeof(s_current));
     memset(s_recent, 0, sizeof(s_recent));
@@ -1313,6 +1546,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
 
 static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
     if (s_wx_edit >= 0) return wx_editor_gesture(ctx, ev);
+    if (s_wx_pick) return wx_pick_gesture(ctx, ev);
     /* v7（用户 2026-10-20）：左右滑动换主页面，效果与点按底部导航一致；
      * 首页为最左页只左滑去书架；起点在导航热区（下沿上扩 16px）不触发。 */
     if (ev->type == UI_GESTURE_SWIPE_L && ev->y0 < UI_NAV_TOUCH_TOP) {
@@ -1387,11 +1621,21 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
         ctx->request_app = &app_pomodoro;
         return APP_REDRAW_NONE;
     }
-    /* 首页天气区（时钟行右组）点击进入天气设置（用户 2026-10-19）。 */
+    /* v9：右组点击按组件分派：木鱼=敲一下（局部刷+音）；天气=设置页；其余无动作。 */
     if (ui_rect_hit(HOME_WX_AREA, ev->x0, ev->y0)) {
-        s_wx_setup = true;
-        s_wx_notice[0] = 0;
-        return APP_REDRAW_FULL;
+        uint8_t zone = app_settings_clock_widget();
+        if (zone == 2) {
+            app_settings_set_muyu_count(app_settings_muyu_count() + 1);
+            read_pico_buzzer_tone(1800, 80);
+            s_area = HOME_WX_AREA;
+            return APP_REDRAW_AREA;
+        }
+        if (zone == 0) {
+            s_wx_setup = true;
+            s_wx_notice[0] = 0;
+            return APP_REDRAW_FULL;
+        }
+        return APP_REDRAW_NONE;
     }
     if (ui_rect_hit(s_layout.stats, ev->x0, ev->y0)) {
         /* 点阅读数据卡弹出阅读目标 + 月历（2026-10-17）。 */
@@ -1416,6 +1660,7 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
         if (key == UI_KEY_1) { ui_keyboard_end(); s_wx_edit = -1; return APP_REDRAW_PAGE; }
         return wx_save_field(ctx);
     }
+    if (s_wx_pick && key == UI_KEY_3) { s_wx_pick = false; return APP_REDRAW_PAGE; }
     if (s_wx_setup && key == UI_KEY_3) { s_wx_setup = false; return APP_REDRAW_PAGE; }
     /* 目标面板期间右键 = 关闭；首页本身是导航根页，按键停留。 */
     if (s_goal_open && key == UI_KEY_3) {
@@ -1431,6 +1676,7 @@ static void home_on_exit(app_ctx_t* ctx) {
     (void)ctx;
     if (s_wx_edit >= 0) { ui_keyboard_end(); s_wx_edit = -1; }
     s_wx_setup = false;
+    s_wx_pick = false;
     s_goal_open = false;
 }
 

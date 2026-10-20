@@ -50,6 +50,9 @@
 #define NVS_KEY_POMO_WORK   "pomo_w"
 #define NVS_KEY_POMO_BREAK  "pomo_b"
 #define NVS_KEY_MUYU_COUNT  "muyu_c"
+/* 首页时钟行右组 widget 五选一（第二十一批 e 段）与自定义文字。 */
+#define NVS_KEY_CLOCK_WIDGET "wx_zone"
+#define NVS_KEY_CLOCK_TEXT   "wx_text"
 #define NVS_KEY_FONT "font"
 #define NVS_KEY_SYS_FONT "sys_font"
 #define NVS_KEY_SYS_SIZE "sys_size"
@@ -135,6 +138,8 @@ static uint8_t s_alarm_hour, s_alarm_minute;
 static uint8_t s_pomo_work = 25;        /* 番茄专注时长（15..60，步进 5） */
 static uint8_t s_pomo_break = 5;        /* 番茄休息时长（5..60，步进 5） */
 static uint32_t s_muyu_count;           /* 木鱼功德累计 */
+static uint8_t s_clock_widget;          /* 首页时钟行右组：0=天气 1=黄历 2=木鱼 3=图片 4=文字 */
+static char s_clock_text[72];           /* 自定义文字（widget 4）*/
 static bool s_reader_hide_images;
 static bool s_reader_hold_refresh;
 static const char *s_reader_key_names[] = {"rd_key_l", "rd_key_m", "rd_key_r"};
@@ -252,6 +257,12 @@ void app_settings_init(void) {
         if (nvs_get_u8(h, NVS_KEY_POMO_BREAK, &raw) == ESP_OK && raw >= 5 && raw <= 60 && raw % 5 == 0) s_pomo_break = raw;
         uint32_t count = 0;
         if (nvs_get_u32(h, NVS_KEY_MUYU_COUNT, &count) == ESP_OK) s_muyu_count = count;
+        uint8_t zone = 0;
+        if (nvs_get_u8(h, NVS_KEY_CLOCK_WIDGET, &zone) == ESP_OK && zone <= 4) s_clock_widget = zone;
+    }
+    {
+        size_t ztext_len = sizeof(s_clock_text);
+        if (nvs_get_str(h, NVS_KEY_CLOCK_TEXT, s_clock_text, &ztext_len) != ESP_OK) s_clock_text[0] = 0;
     }
     for (int ti = 0; ti < 3; ++ti) {
         char tkey[8]; snprintf(tkey, sizeof(tkey), "todo%d", ti + 1);
@@ -920,6 +931,23 @@ void app_settings_set_muyu_count(uint32_t count) {
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     if (nvs_set_u32(h, NVS_KEY_MUYU_COUNT, count) == ESP_OK) (void)nvs_commit(h);
+    nvs_close(h);
+}
+/* ---- 首页时钟行右组 widget（第二十一批 e 段，2026-10-20）---- */
+uint8_t app_settings_clock_widget(void) { return s_clock_widget; }
+void app_settings_set_clock_widget(uint8_t type) {
+    if (type > 4 || type == s_clock_widget) return;
+    s_clock_widget = type;
+    nvs_put_u8(NVS_KEY_CLOCK_WIDGET, type);
+}
+const char *app_settings_clock_text(void) { return s_clock_text; }
+void app_settings_set_clock_text(const char *text) {
+    if (!text) text = "";
+    if (!strcmp(s_clock_text, text)) return;
+    strlcpy(s_clock_text, text, sizeof(s_clock_text));
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_str(h, NVS_KEY_CLOCK_TEXT, s_clock_text) == ESP_OK) (void)nvs_commit(h);
     nvs_close(h);
 }
 void app_settings_set_shelf_style(uint8_t style) {

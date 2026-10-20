@@ -1,11 +1,11 @@
 /* SPDX-License-Identifier: Apache-2.0
- * 中文：心知天气 v3 实现。复用 weread 已验证的 esp_http_client+crt_bundle
- * HTTPS 链路与 cJSON（依赖已在）；配置源 NVS 优先、回退 TF 卡 weather.txt；
- * NVS 缓存三天预报；失败 10 分钟退避。
- * English: Seniverse v3 implementation on the proven weread HTTP stack
- * (esp_http_client + crt_bundle, cJSON already in deps); config from NVS
- * first, TF card weather.txt as fallback; NVS caches the 3-day forecast;
- * failures back off for ten minutes.
+ * 中文：天气三源实现（用户 2026-10-20 第二十一批 e 段）：心知 v3 / 和风 v7 /
+ * 彩云 v2.6，服务商 NVS prov 可切。复用 weread 已验证的 esp_http_client+crt_bundle
+ * HTTPS 链路与 cJSON；配置源 NVS 优先、回退 TF 卡 weather.txt（city=/key=/prov=）；
+ * NVS 缓存三天预报（统一 wx_day_t）；失败 10 分钟退避。和风需 GeoAPI 查地点 ID
+ * （结果缓存至下次配置变更）；彩云地点栏直接填经纬度。
+ * English: Three weather providers (Seniverse v3 / QWeather v7 / Caiyun v2.6)
+ * behind one wx_day_t cache; QWeather resolves city names via its GeoAPI first.
  */
 #include "weather_service.h"
 #include "cJSON.h"
@@ -28,6 +28,13 @@ static const char *TAG = "weather";
 #define WX_CACHE_NVS "wx_cache"
 #define WX_CFG_NVS "wx_cfg"
 #define WX_BACKOFF_MS (10u * 60u * 1000u)
+/* 和风：GeoAPI 查地点 ID → devapi 三天预报。 */
+#define QH_GEO_HOST "geoapi.qweather.com"
+#define QH_GEO_PATH "/v2/city/lookup"
+#define QH_DEV_HOST "devapi.qweather.com"
+#define QH_DEV_PATH "/v7/weather/3d"
+/* 彩云：token 在路径里，地点=经纬度。 */
+#define CY_HOST "api.caiyunapp.com"
 
 typedef struct {
     int code;               /* weather_code_t */
@@ -39,6 +46,9 @@ static char s_city_cfg[48];     /* 生效配置的地点（NVS 优先，回退 w
 static char s_key[40];
 static bool s_cfg_loaded;
 static weather_config_source_t s_src;   /* 当前生效配置源 */
+static weather_provider_t s_provider;  /* 数据服务商（默认心知） */
+static char s_qh_id[16];         /* 和风地点 ID（GeoAPI 结果缓存） */
+static char s_qh_city[48];       /* 和风 GeoAPI 规范城市名 */
 static wx_day_t s_days[3];
 static char s_city[48];         /* API 规范城市名 */
 static int s_day_count;
@@ -58,6 +68,9 @@ static bool cfg_nvs_load(char *city, size_t city_cap, char *key, size_t key_cap)
     if (nvs_get_str(h, "city", city, &len) != ESP_OK) city[0] = 0;
     len = key_cap;
     if (nvs_get_str(h, "key", key, &len) != ESP_OK) key[0] = 0;
+    uint8_t prov = 0;
+    if (nvs_get_u8(h, "prov", &prov) != ESP_OK || prov > WEATHER_PROVIDER_CAIYUN) prov = 0;
+    s_provider = (weather_provider_t)prov;
     nvs_close(h);
     return city[0] || key[0];
 }
@@ -103,6 +116,10 @@ static void load_config(void) {
         } else if (!strncmp(line, "key=", 4)) {
             snprintf(s_key, sizeof(s_key), "%.36s", line + 4);
             got = true;
+        } else if (!strncmp(line, "prov=", 5)) {
+            int p = atoi(line + 5);
+            s_provider = (p >= 0 && p <= WEATHER_PROVIDER_CAIYUN) ? (weather_provider_t)p
+                                                                  : WEATHER_PROVIDER_SENIVERSE;
         }
     }
     fclose(f);
@@ -186,69 +203,238 @@ static int today_index(void) {
     return -1;
 }
 
-/* 抓三天预报（同步核心；任务壳与对时窗口直调共用，用户 2026-10-19）。
- * 返回 true = 成功且缓存已更新。当前温度已取消：仅取 code/high/low/date。 */
-static bool fetch_forecast(void) {
-    char url[256];
-    snprintf(url, sizeof(url), "https://" WX_HOST WX_PATH "&location=%s&key=%s", s_city_cfg, s_key);
+/* 彩云 skycon 英文枚举 → 图标码（雨/雪族归并）。 */
+static int skycon_to_code(const char *s) {
+    if (!s || !s[0]) return WEATHER_CODE_UNKNOWN;
+    if (strstr(s, "CLEAR")) return WEATHER_CODE_SUNNY;
+    if (strstr(s, "PARTLY")) return WEATHER_CODE_PARTLY;
+    if (!strcmp(s, "CLOUDY")) return WEATHER_CODE_CLOUDY;
+    if (strstr(s, "RAIN") || strstr(s, "SHOWER")) return WEATHER_CODE_RAIN;
+    if (strstr(s, "SNOW") || strstr(s, "SLEET") || strstr(s, "HAIL")) return WEATHER_CODE_SNOW;
+    if (strstr(s, "FOG") || strstr(s, "HAZE") || strstr(s, "SMOG") ||
+        strstr(s, "SAND") || strstr(s, "DUST")) return WEATHER_CODE_FOG;
+    return WEATHER_CODE_UNKNOWN;
+}
+
+/* 通用 HTTPS GET：≤64 KiB 整体读回，返回 malloc 的 body（调用方 free）。 */
+static bool http_get_body(const char *url, char **out, size_t *out_len) {
+    *out = NULL;
+    *out_len = 0;
     esp_http_client_config_t config = { .url = url, .crt_bundle_attach = esp_crt_bundle_attach, .timeout_ms = 12000 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    char *body = NULL;
-    size_t body_len = 0;
     bool ok = false;
     if (client) {
         if (esp_http_client_open(client, 0) == ESP_OK) {
             int read = esp_http_client_fetch_headers(client);
             int64_t total = esp_http_client_get_content_length(client);
             if (read >= 0 && total > 0 && total < 65536) {
-                body = malloc((size_t)total + 1);
+                char *body = malloc((size_t)total + 1);
                 if (body) {
-                    while (body_len < (size_t)total) {
-                        int n = esp_http_client_read(client, body + body_len, (int)((size_t)total - body_len));
+                    size_t len = 0;
+                    while (len < (size_t)total) {
+                        int n = esp_http_client_read(client, body + len, (int)((size_t)total - len));
                         if (n <= 0) break;
-                        body_len += (size_t)n;
+                        len += (size_t)n;
                     }
-                    body[body_len] = 0;
-                    ok = esp_http_client_get_status_code(client) == 200 && body_len == (size_t)total;
+                    body[len] = 0;
+                    if (esp_http_client_get_status_code(client) == 200 && len == (size_t)total) {
+                        *out = body;
+                        *out_len = len;
+                        ok = true;
+                    } else {
+                        free(body);
+                    }
                 }
             }
         }
         esp_http_client_cleanup(client);
     }
+    return ok;
+}
+
+/* 解析结果写回 s_days/s_city 的公共出口：每天 code/high/low/date + 城市名。 */
+static bool days_commit(int count, const int *codes, const int *highs, const int *lows,
+                        const char (*dates)[12], const char *city_name) {
+    if (count <= 0) return false;
+    s_day_count = count > 3 ? 3 : count;
+    for (int i = 0; i < s_day_count; ++i) {
+        s_days[i].code = codes[i];
+        s_days[i].high = highs[i];
+        s_days[i].low = lows[i];
+        snprintf(s_days[i].date, sizeof(s_days[i].date), "%s", dates[i]);
+    }
+    if (city_name && city_name[0])
+        snprintf(s_city, sizeof(s_city), "%s", city_name);
+    s_fetch_ok = true;
+    cache_save();
+    return true;
+}
+
+static bool parse_seniverse(const char *body) {
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return false;
+    cJSON *results = cJSON_GetObjectItem(root, "results");
+    cJSON *first = results ? cJSON_GetArrayItem(results, 0) : NULL;
+    cJSON *location = first ? cJSON_GetObjectItem(first, "location") : NULL;
+    cJSON *name = location ? cJSON_GetObjectItem(location, "name") : NULL;
+    cJSON *daily = first ? cJSON_GetObjectItem(first, "daily") : NULL;
+    bool ok = false;
+    if (daily && cJSON_IsArray(daily)) {
+        int codes[3] = {0}, highs[3] = {0}, lows[3] = {0};
+        char dates[3][12] = {{0}};
+        int count = 0;
+        int total = cJSON_GetArraySize(daily);
+        if (total > 3) total = 3;
+        for (int i = 0; i < total; ++i) {
+            cJSON *d = cJSON_GetArrayItem(daily, i);
+            cJSON *dtext = cJSON_GetObjectItem(d, "text_day");
+            cJSON *dhigh = cJSON_GetObjectItem(d, "high");
+            cJSON *dlow = cJSON_GetObjectItem(d, "low");
+            cJSON *ddate = cJSON_GetObjectItem(d, "date");
+            if (!cJSON_IsString(dtext) || !cJSON_IsString(dhigh) || !cJSON_IsString(dlow)) continue;
+            codes[count] = text_to_code(dtext->valuestring);
+            highs[count] = atoi(dhigh->valuestring);
+            lows[count] = atoi(dlow->valuestring);
+            snprintf(dates[count], sizeof(dates[count]), "%s",
+                     cJSON_IsString(ddate) ? ddate->valuestring : "");
+            ++count;
+        }
+        ok = days_commit(count, codes, highs, lows, dates,
+                         name && cJSON_IsString(name) ? name->valuestring : NULL);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+/* 和风 GeoAPI：城市名 → 地点 ID（写入 s_qh_id/s_qh_city，随配置失效清零）。 */
+static bool qh_lookup_id(void) {
+    if (s_qh_id[0]) return true;
+    char url[256];
+    snprintf(url, sizeof(url), "https://" QH_GEO_HOST QH_GEO_PATH "?location=%s&key=%s",
+             s_city_cfg, s_key);
+    char *body = NULL;
+    size_t body_len = 0;
+    bool ok = http_get_body(url, &body, &body_len);
     if (ok) {
         cJSON *root = cJSON_Parse(body);
         if (root) {
-            cJSON *results = cJSON_GetObjectItem(root, "results");
-            cJSON *first = results ? cJSON_GetArrayItem(results, 0) : NULL;
-            cJSON *location = first ? cJSON_GetObjectItem(first, "location") : NULL;
-            cJSON *name = location ? cJSON_GetObjectItem(location, "name") : NULL;
-            cJSON *daily = first ? cJSON_GetObjectItem(first, "daily") : NULL;
-            if (daily && cJSON_IsArray(daily)) {
-                s_day_count = cJSON_GetArraySize(daily);
-                if (s_day_count > 3) s_day_count = 3;
-                for (int i = 0; i < s_day_count; ++i) {
-                    cJSON *d = cJSON_GetArrayItem(daily, i);
-                    cJSON *dtext = cJSON_GetObjectItem(d, "text_day");
-                    cJSON *dhigh = cJSON_GetObjectItem(d, "high");
-                    cJSON *dlow = cJSON_GetObjectItem(d, "low");
-                    cJSON *ddate = cJSON_GetObjectItem(d, "date");
-                    if (!cJSON_IsString(dtext) || !cJSON_IsString(dhigh) || !cJSON_IsString(dlow)) continue;
-                    s_days[i].code = text_to_code(dtext->valuestring);
-                    s_days[i].high = atoi(dhigh->valuestring);
-                    s_days[i].low = atoi(dlow->valuestring);
-                    snprintf(s_days[i].date, sizeof(s_days[i].date), "%s",
-                             cJSON_IsString(ddate) ? ddate->valuestring : "");
-                }
-                if (name && cJSON_IsString(name))
-                    snprintf(s_city, sizeof(s_city), "%s", name->valuestring);
-                s_fetch_ok = true;
-                cache_save();
+            cJSON *arr = cJSON_GetObjectItem(root, "location");
+            cJSON *first = arr ? cJSON_GetArrayItem(arr, 0) : NULL;
+            cJSON *id = first ? cJSON_GetObjectItem(first, "id") : NULL;
+            cJSON *nm = first ? cJSON_GetObjectItem(first, "name") : NULL;
+            if (id && cJSON_IsString(id)) {
+                snprintf(s_qh_id, sizeof(s_qh_id), "%s", id->valuestring);
+                if (nm && cJSON_IsString(nm))
+                    snprintf(s_qh_city, sizeof(s_qh_city), "%s", nm->valuestring);
+                else
+                    snprintf(s_qh_city, sizeof(s_qh_city), "%s", s_city_cfg);
+            } else {
+                ok = false;
             }
             cJSON_Delete(root);
+        } else {
+            ok = false;
         }
     }
     free(body);
-    if (!ok) ESP_LOGW(TAG, "forecast fetch failed");
+    if (!ok) ESP_LOGW(TAG, "qweather geo lookup failed");
+    return ok;
+}
+
+static bool parse_qweather(const char *body) {
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return false;
+    cJSON *daily = cJSON_GetObjectItem(root, "daily");
+    bool ok = false;
+    if (daily && cJSON_IsArray(daily)) {
+        int codes[3] = {0}, highs[3] = {0}, lows[3] = {0};
+        char dates[3][12] = {{0}};
+        int count = 0;
+        int total = cJSON_GetArraySize(daily);
+        if (total > 3) total = 3;
+        for (int i = 0; i < total; ++i) {
+            cJSON *d = cJSON_GetArrayItem(daily, i);
+            cJSON *dtext = cJSON_GetObjectItem(d, "textDay");
+            cJSON *dhigh = cJSON_GetObjectItem(d, "tempMax");
+            cJSON *dlow = cJSON_GetObjectItem(d, "tempMin");
+            cJSON *ddate = cJSON_GetObjectItem(d, "fxDate");
+            if (!cJSON_IsString(dtext) || !cJSON_IsString(dhigh) || !cJSON_IsString(dlow)) continue;
+            codes[count] = text_to_code(dtext->valuestring);
+            highs[count] = atoi(dhigh->valuestring);
+            lows[count] = atoi(dlow->valuestring);
+            snprintf(dates[count], sizeof(dates[count]), "%s",
+                     cJSON_IsString(ddate) ? ddate->valuestring : "");
+            ++count;
+        }
+        ok = days_commit(count, codes, highs, lows, dates, s_qh_city[0] ? s_qh_city : s_city_cfg);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+static bool parse_caiyun(const char *body) {
+    cJSON *root = cJSON_Parse(body);
+    if (!root) return false;
+    cJSON *result = cJSON_GetObjectItem(root, "result");
+    cJSON *daily = result ? cJSON_GetObjectItem(result, "daily") : NULL;
+    bool ok = false;
+    if (daily && cJSON_IsArray(daily)) {
+        int codes[3] = {0}, highs[3] = {0}, lows[3] = {0};
+        char dates[3][12] = {{0}};
+        int count = 0;
+        int total = cJSON_GetArraySize(daily);
+        if (total > 3) total = 3;
+        for (int i = 0; i < total; ++i) {
+            cJSON *d = cJSON_GetArrayItem(daily, i);
+            cJSON *skycon = cJSON_GetObjectItem(d, "skycon");
+            cJSON *temp = cJSON_GetObjectItem(d, "temperature");
+            cJSON *tmax = temp ? cJSON_GetObjectItem(temp, "max") : NULL;
+            cJSON *tmin = temp ? cJSON_GetObjectItem(temp, "min") : NULL;
+            cJSON *ddate = cJSON_GetObjectItem(d, "date");
+            if (!skycon || !cJSON_IsString(skycon) || !cJSON_IsNumber(tmax) || !cJSON_IsNumber(tmin))
+                continue;
+            codes[count] = skycon_to_code(skycon->valuestring);
+            highs[count] = (int)cJSON_GetNumberValue(tmax);
+            lows[count] = (int)cJSON_GetNumberValue(tmin);
+            if (cJSON_IsString(ddate)) {
+                /* 彩云日期带时区后缀（2026-10-20T00:00+08:00）：取前 10 字符。 */
+                snprintf(dates[count], sizeof(dates[count]), "%.10s", ddate->valuestring);
+            }
+            ++count;
+        }
+        ok = days_commit(count, codes, highs, lows, dates, s_city_cfg);
+    }
+    cJSON_Delete(root);
+    return ok;
+}
+
+/* 抓三天预报（同步核心；任务壳与对时窗口直调共用）。
+ * 按服务商分发：心知直连；和风先 GeoAPI 查 ID；彩云地点=经纬度。 */
+static bool fetch_forecast(void) {
+    char url[320];
+    char *body = NULL;
+    size_t body_len = 0;
+    bool ok = false;
+    switch (s_provider) {
+    case WEATHER_PROVIDER_QWEATHER:
+        if (!qh_lookup_id()) return false;
+        snprintf(url, sizeof(url), "https://" QH_DEV_HOST QH_DEV_PATH "?location=%s&key=%s",
+                 s_qh_id, s_key);
+        if (http_get_body(url, &body, &body_len)) ok = parse_qweather(body);
+        break;
+    case WEATHER_PROVIDER_CAIYUN:
+        snprintf(url, sizeof(url), "https://" CY_HOST "/v2.6/%s/%s/daily?dailysteps=3",
+                 s_key, s_city_cfg);
+        if (http_get_body(url, &body, &body_len)) ok = parse_caiyun(body);
+        break;
+    default:
+        snprintf(url, sizeof(url), "https://" WX_HOST WX_PATH "&location=%s&key=%s",
+                 s_city_cfg, s_key);
+        if (http_get_body(url, &body, &body_len)) ok = parse_seniverse(body);
+        break;
+    }
+    free(body);
+    if (!ok) ESP_LOGW(TAG, "forecast fetch failed (provider=%d)", (int)s_provider);
     return ok;
 }
 
@@ -295,10 +481,30 @@ static void weather_invalidate(void) {
     s_day_count = 0;
     s_city[0] = 0;
     memset(s_days, 0, sizeof(s_days));
+    s_qh_id[0] = 0;                      /* 和风地点 ID 随配置作废 */
+    s_qh_city[0] = 0;
     cache_save();                       /* 空缓存持久化，避免重启后旧城市回放 */
     s_last_attempt_ms = 0;
     s_fetch_ok = false;
     s_refresh_done_ms = 0;
+}
+
+weather_provider_t weather_config_provider(void) {
+    load_config();
+    return s_provider;
+}
+
+esp_err_t weather_config_save_provider(weather_provider_t p) {
+    if (p < WEATHER_PROVIDER_SENIVERSE || p > WEATHER_PROVIDER_CAIYUN) return ESP_ERR_INVALID_ARG;
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(WX_CFG_NVS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = nvs_set_u8(h, "prov", (uint8_t)p);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) return err;
+    weather_invalidate();               /* 不同源的地点语义不同：清缓存与退避 */
+    return ESP_OK;
 }
 
 weather_config_source_t weather_config_source(void) {
@@ -334,12 +540,15 @@ esp_err_t weather_config_reset(void) {
     if (err != ESP_OK) return err;
     err = nvs_erase_key(h, "city");
     esp_err_t err2 = nvs_erase_key(h, "key");
-    if (err == ESP_OK) err = err2;
+    esp_err_t err3 = nvs_erase_key(h, "prov");
+    if (err == ESP_OK && err2 == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    else if (err == ESP_OK) err = err2;
+    if (err == ESP_OK && err3 != ESP_ERR_NVS_NOT_FOUND) err = err3;
     if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) { nvs_close(h); return err; }
     err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) return err;
-    weather_invalidate();               /* 回退 TF 卡 weather.txt 或未配置 */
+    weather_invalidate();               /* 回退 TF 卡 weather.txt 或未配置；服务商回心知 */
     return ESP_OK;
 }
 
