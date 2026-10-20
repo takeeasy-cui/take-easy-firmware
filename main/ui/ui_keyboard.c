@@ -590,9 +590,14 @@ static ui_keyboard_result_t t9_hit(int x, int y, int top) {
 }
 static ui_keyboard_result_t tap(int x, int y, int top) {
     if (!s_edit || y < top || y >= top + 502 || x < KBD_X0 || x >= KBD_X0 + KBD_W) return UI_KEYBOARD_NONE;
+    /* 21h 修复（真机：键盘正常弹出但所有点击无反应）：绘制走 rect(...,top) 全是屏幕坐标，
+     * 而分派里 in_key 的键位 y（row_y/num_row_y/cy/by）一直是面板坐标——触摸 y 差一个
+     * top，导致编码行/额外行/字母区/功能行全部判 miss（只有候选行 visible() 的盒子和
+     * 数字面板行带判断恰好一致才活）。入口统一换成面板内 y，in_key 调用保持面板坐标。 */
+    y -= top;
     const bool nine = nine_active();
     /* 候选带两行。 */
-    if (y < top + 56) {                     /* 编码行：组合中点它开关 T9 宫格 */
+    if (y < 56) {                         /* 编码行：组合中点它开关 T9 宫格 */
         if (s_comp[0]) {
             s_t9 = !s_t9;
             ime_glue_grid_paging(s_t9);
@@ -601,10 +606,10 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
         }
         return UI_KEYBOARD_NONE;
     }
-    if (y < top + 128) {                    /* 候选行：‹› 翻页 + 候选块 */
+    if (y < 128) {                        /* 候选行：‹› 翻页 + 候选块 */
         if (x < 68) return ui_keyboard_page(-1) ? UI_KEYBOARD_CHANGED : UI_KEYBOARD_NONE;
         if (x >= 616) return ui_keyboard_page(1) ? UI_KEYBOARD_CHANGED : UI_KEYBOARD_NONE;
-        EpdRect boxes[KB_CAND_MAX]; size_t count = visible(boxes, top);
+        EpdRect boxes[KB_CAND_MAX]; size_t count = visible(boxes, 0);   /* 面板坐标（y 已归一） */
         for (size_t i = 0; i < count; ++i)
             if (in_key(x, y, boxes[i].x, boxes[i].y, boxes[i].width, boxes[i].height)) {
                 if (commit((int)i)) return UI_KEYBOARD_CHANGED;
@@ -616,7 +621,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
     /* 额外行。 */
     {
         const int ry = row_y(0), rh = row_h(0);
-        if (y >= top + ry && y < top + ry + rh) {
+        if (y >= ry && y < ry + rh) {
             int ex[8], ew[8];
             if (nine) nine_extra_row_rects(ex, ew); else extra_row_rects(ex, ew);
             if (in_key(x, y, ex[0], ry, ew[0], rh)) {          /* 布局循环（仅中文态） */
@@ -649,11 +654,11 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
     /* 字母行带（187..439）：按当前面板/布局分派。 */
     {
         const int band_y = row_y(1), band_h = 252;
-        if (y >= top + band_y && y < top + band_y + band_h) {
+        if (y >= band_y && y < band_y + band_h) {
             if (s_page == 1) {                                /* 符号面板 */
                 for (int r = 0; r < 3; ++r) {
                     const int ky = row_y(1 + r), kh = row_h(1 + r);
-                    if (y < top + ky || y >= top + ky + kh) continue;
+                    if (y < ky || y >= ky + kh) continue;
                     for (int c = 0; c < 10; ++c)
                         if (in_key(x, y, grid_x0() + c * KEY_W, ky, KEY_W - 4, kh - 4)) {
                             key_char(EVK_SYM_PANEL[r][c]);
@@ -666,7 +671,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
                 const int mw = KBD_W - 2 * sw;
                 for (int r = 0; r < 4; ++r) {
                     const int ry = num_row_y(r), rh = num_row_h(r);
-                    if (y < top + ry || y >= top + ry + rh) continue;
+                    if (y < ry || y >= ry + rh) continue;
                     if (x < KBD_X0 + sw) { key_char(EVK_NUM_LEFT[r]); return UI_KEYBOARD_CHANGED; }
                     if (x >= KBD_X0 + KBD_W - sw) {
                         if (r == 0) { backspace(); return UI_KEYBOARD_CHANGED; }
@@ -718,7 +723,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
                 }
                 for (int r = 0; r < 3; ++r) {                 /* 中间 3×3：1分词 + 组 0..7 */
                     const int ky = band_y + r * 84;
-                    if (y < top + ky || y >= top + ky + 84) continue;
+                    if (y < ky || y >= ky + 84) continue;
                     for (int c = 0; c < 3; ++c) {
                         const int idx = r * 3 + c;
                         if (!in_key(x, y, cx + c * cw, ky, cw - 4, 80)) continue;
@@ -731,7 +736,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
             } else if (ambig_active_layout()) {               /* 14 / 18 键 */
                 for (int r = 0; r < 3; ++r) {
                     const int ky = row_y(1 + r);
-                    if (y < top + ky || y >= top + ky + 84) continue;
+                    if (y < ky || y >= ky + 84) continue;
                     int xs[8], ws[8];
                     ambig_row_rects(r, xs, ws);
                     const int n = ime_glue_ambig_row_keys(r);
@@ -745,7 +750,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
             } else {                                          /* 26 全拼 */
                 for (int r = 0; r < 3; ++r) {
                     const int ky = row_y(1 + r), kh = row_h(1 + r);
-                    if (y < top + ky || y >= top + ky + kh) continue;
+                    if (y < ky || y >= ky + kh) continue;
                     if (r < 2) {
                         const char *row = EVK_LETTER_ROWS[r];
                         const int n = (int)strlen(row);
@@ -771,7 +776,7 @@ static ui_keyboard_result_t tap(int x, int y, int top) {
     /* 功能行：①②面板 | 空格 | 中/英 | 确定。 */
     {
         const int by = row_y(4), bh = row_h(4);
-        if (y >= top + by && y < top + by + bh) {
+        if (y >= by && y < by + bh) {
             int fx[5], fw[5];
             func_row_rects(fx, fw);
             if (in_key(x, y, fx[0], by, fw[0], bh)) {          /* ①：字母→符 符→ABC 数→符 */

@@ -381,10 +381,11 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
 }
 
 static app_redraw_t on_key_long(app_ctx_t *ctx, int key) {
-    /* 21g（用户反馈）：中键长按=退出回首页；编辑态先保存再退。 */
+    /* 21h（真机反馈）：中键长按=退出（request_return 恒语义，同计算器，返回来源页）；
+     * 21g 误用 ui_nav_request(ctx,0)，那是跳首页不是退出。编辑态先保存再退。 */
     if (key != UI_KEY_2) return APP_REDRAW_NONE;
     if (s_editing) (void)editor_finish();
-    ui_nav_request(ctx, 0);
+    ctx->request_return = true;
     return APP_REDRAW_NONE;
 }
 
