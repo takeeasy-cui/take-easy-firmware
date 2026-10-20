@@ -6506,7 +6506,24 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
             }
         }
         if (area.width) {
-            render(ctx, ctx->fb);
+            if (s_view == SHELF && app_settings_shelf_style() == 5) {
+                /* 22a（书架封面就绪局部刷）：整页 render() 白白重画四行 ttf 文本、家具与
+                 * 导航；封面是异步解码后异步就绪的，只需把变化行的封面+文字重画进 fb 再推
+                 * （行底卡背景上次整页已画，封面为不透明灰度覆盖其上）。与 21k 首页同模式。 */
+                for (int row = 0; row < shelf_rows(); ++row) {
+                    if (!(changed & (1u << row))) continue;
+                    int i = ctx->leaf * shelf_rows() + row;
+                    if (i >= s_visible_count) break;
+                    EpdRect r = row_rect(row);
+                    char name[128]; copy_text(name, sizeof(name), s_shelf[i].name);
+                    if (s_pressed_control == row)
+                        r.y -= app_settings_shelf_style() == 5 ? SHELF_LIST_BOUNCE_PX : SHELF_BOOK_LIFT_PX;
+                    draw_shelf_cover(ctx->fb, r, row, name, s_shelf[i].favorite);
+                    draw_list_row(ctx->fb, row, &s_shelf[i]);
+                }
+            } else {
+                render(ctx, ctx->fb);
+            }
             s_area = area;
             s_mode = s_view == SHELF && app_settings_main_fast_refresh() ? MODE_DU : MODE_GL16;
             s_shelf_feedback_pending = s_view == SHELF;
