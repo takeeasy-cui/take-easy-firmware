@@ -18,6 +18,8 @@ ui_inflate_4bpp / sleep.c lock_cover_default):
     `python tools/assets_compress.py main/assets`.
   - cover_default: first W*H bytes = gray plane, next W*H bytes = alpha plane;
     a>=250 overwrites, 0<a<250 linear-blends, 0 keeps the screen beneath.
+    21j: edges are hardened (alpha threshold 128, gray 16-level quantized) so
+    the overlay draws crisp like the retired fox art instead of blended mush.
 
 The avatar is contain-fitted into the previous fox avatar's content box so the
 status bar (38x38 sample of the 82x82) and the settings page keep the same
@@ -138,14 +140,21 @@ def convert_cover(assets: Path) -> None:
         for x in range(gray.width):
             if apx[x, y] == 0:
                 gpx[x, y] = 255
-    gray = center_crop(gray).resize((W, H), Image.BILINEAR)
-    alpha = center_crop(alpha).resize((W, H), Image.BILINEAR)
+    # 21j（真机反馈「边框不清晰」）：旧狐狸图是硬边 alpha（0/255），叠加全部走
+    # a≥250 直接覆盖分支，轮廓/文字锐利；BILINEAR 保留的 1~2px 软边在 4bpp 底上
+    # 按 alpha 混合→灰糊边。改 LANCZOS + alpha 128 阈值硬边 + 灰度 16 级量化
+    # （平涂色归整，边缘利落，与旧图硬边风格对齐；与 4bpp 调色板同词汇）。
+    gray = center_crop(gray).resize((W, H), Image.LANCZOS)
+    alpha = center_crop(alpha).resize((W, H), Image.LANCZOS)
+    alpha = alpha.point(lambda a: 255 if a >= 128 else 0)
+    gray = gray.point(lambda g: min(255, round(g / 17) * 17))
     out = gray.tobytes() + alpha.tobytes()
     assert len(out) == W * H * 2
     (assets / "cover_default.bin").write_bytes(out)
+    mid = sum(1 for a in alpha.tobytes() if 0 < a < 255)
     opaque = sum(1 for a in alpha.tobytes() if a >= 250)
     print(f"cover: cover_default.bin {len(out)} bytes "
-          f"(opaque pixels {opaque} = {100.0 * opaque / (W * H):.1f}%)")
+          f"(opaque {opaque}, hard-edge only, soft remnants {mid})")
 
 
 def main() -> int:
