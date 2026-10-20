@@ -596,9 +596,6 @@ static void draw_stats(uint8_t* fb) {
 static bool s_goal_open;
 static int s_goal_month_offset;
 static int s_goal_sel_day;   /* 2026-10-17：0=今天；>0=当前显示月份第 N 日（黄历随动）。 */
-static int s_goal_edit = -1;
-static char s_goal_edit_buf[96];
-static ui_text_edit_t s_goal_edit_input;
 
 /* ============ 天气设置页（用户 2026-10-19：点击首页天气区图标进入） ============
  * 默认显示当前生效源的值（NVS 优先、回退 TF 卡 weather.txt），可改；
@@ -612,24 +609,20 @@ static char s_wx_notice[96];
 static EpdRect s_wx_area;       /* 键盘局部刷新区 */
 static bool s_wx_layout, s_wx_settle;
 
-/* v3 布局：月历置顶 96..716 → 老黄历+待办并排 736..886 → 目标行 906..1006；间隙统一 20。 */
+/* v3 布局：月历置顶 96..716 → 老黄历 734..910（整宽）→ 目标行 930..1038。 */
 #define GOAL_CAL_TOP 96
 #define GOAL_CAL_H   620
 #define GOAL_ROW_H   82
 #define GOAL_DOT_R   28
 /* v1.8 布局 v4（用户 2026-10-17 真机反馈）：卡加高、字体放大、目标行
- * 下沉收紧底部留白；黄历/待办区域 734..910，目标行 930..1038。 */
+ * 下沉收紧底部留白。v8（用户 2026-10-20）：备忘录移除，老黄历独占整宽。 */
 #define GOAL_ALM_Y   734
 #define GOAL_ALM_H   176
 #define GOAL_SET_Y   930
 #define GOAL_SET_H   108
-#define GOAL_TODO_ROWS 3
-#define GOAL_TODO_LINE_H 56
 
 static EpdRect goal_month_arrow(int dir) { return (EpdRect){dir < 0 ? 36 : 584, 100, 64, 56}; }
-static EpdRect goal_almanac_rect(void) { return (EpdRect){36, GOAL_ALM_Y, 296, GOAL_ALM_H}; }
-static EpdRect goal_todo_rect(void) { return (EpdRect){352, GOAL_ALM_Y, 296, GOAL_ALM_H}; }
-static EpdRect goal_todo_line(int i) { return (EpdRect){356, GOAL_ALM_Y + 8 + i * GOAL_TODO_LINE_H, 288, GOAL_TODO_LINE_H - 4}; }
+static EpdRect goal_almanac_rect(void) { return (EpdRect){36, GOAL_ALM_Y, 612, GOAL_ALM_H}; }
 static EpdRect goal_minus_rect(void) { return (EpdRect){36, GOAL_SET_Y, 110, GOAL_SET_H}; }
 static EpdRect goal_plus_rect(void) { return (EpdRect){538, GOAL_SET_Y, 110, GOAL_SET_H}; }
 static EpdRect goal_value_rect(void) { return (EpdRect){166, GOAL_SET_Y, 352, GOAL_SET_H}; }
@@ -832,8 +825,9 @@ static void render_goal_panel(uint8_t* fb) {
             epd_draw_circle(cx, cy, GOAL_DOT_R + 5, NX8_INK, fb);
         }
     }
-    /* ---- 老黄历（v2，参考网上常用设计）：上行农历大字 + 干支年小字居中，
-     * 横线分隔；下行左右两块：宜=实心黑圆白字徽章 / 忌=空心圆黑字徽章，右侧条目 ---- */
+    /* ---- 老黄历 v8（用户 2026-10-20，备忘录移除后整宽重排）：
+     * 上行农历大字（36）+ 干支年小字居中，横线分隔；
+     * 下行宜/忌两块徽章分居左右半区，条目字号 18→24。 ---- */
     EpdRect alm = goal_almanac_rect();
     ui_fill_round_rect(fb, alm, NX_R_CARD, NX8_PAPER);
     ui_draw_control_frame(fb, alm, NX_R_CARD, NX8_INK);
@@ -845,45 +839,17 @@ static void render_goal_panel(uint8_t* fb) {
         if (!lunar[0]) {
             ui_text_vc(fb, alm.x + alm.width / 2, alm.y + alm.height / 2, 28, "老黄历", EPD_DRAW_ALIGN_CENTER, false);
         } else {
-            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 40, 30, lunar, EPD_DRAW_ALIGN_CENTER, false);
-            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 74, 20, gz, EPD_DRAW_ALIGN_CENTER, false);
-            ui_fill_rect_fast((EpdRect){alm.x + 20, alm.y + 100, alm.width - 40, 2}, NX8_INK, fb);
+            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 44, 36, lunar, EPD_DRAW_ALIGN_CENTER, false);
+            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 88, 22, gz, EPD_DRAW_ALIGN_CENTER, false);
+            ui_fill_rect_fast((EpdRect){alm.x + 24, alm.y + 116, alm.width - 48, 2}, NX8_INK, fb);
             /* 宜：实心黑圆白字；忌：空心圆（2px 黑边）黑字。 */
-            epd_fill_circle(alm.x + 36, alm.y + 136, 16, NX8_INK, fb);
-            ui_text_vc(fb, alm.x + 36, alm.y + 136, 20, "宜", EPD_DRAW_ALIGN_CENTER, true);
-            epd_draw_circle(alm.x + 184, alm.y + 136, 16, NX8_INK, fb);
-            epd_draw_circle(alm.x + 184, alm.y + 136, 15, NX8_INK, fb);
-            ui_text_vc(fb, alm.x + 184, alm.y + 136, 20, "忌", EPD_DRAW_ALIGN_CENTER, false);
-            ui_text_vc(fb, alm.x + 60, alm.y + 138, 18, yi, EPD_DRAW_ALIGN_LEFT, false);
-            ui_text_vc(fb, alm.x + 208, alm.y + 138, 18, ji, EPD_DRAW_ALIGN_LEFT, false);
-        }
-    }
-    EpdRect todo = goal_todo_rect();
-    ui_fill_round_rect(fb, todo, NX_R_CARD, NX8_PAPER);
-    ui_draw_control_frame(fb, todo, NX_R_CARD, NX8_INK);
-    /* v5：备忘录（原待办事宜，用户 2026-10-19 改名）字体再加大 24；全空时只显示单个“备忘录”占位卡。 */
-    {
-        int filled = 0;
-        for (int i = 0; i < GOAL_TODO_ROWS; ++i) if (app_settings_todo(i)[0]) ++filled;
-        if (!filled) {
-            ui_text_vc(fb, todo.x + todo.width / 2, GOAL_ALM_Y + GOAL_ALM_H / 2 + 8, 26,
-                       "备忘录", EPD_DRAW_ALIGN_CENTER, false);
-        } else {
-            int row = 0;
-            for (int i = 0; i < GOAL_TODO_ROWS && row < 3; ++i) {
-                const char *t = app_settings_todo(i);
-                if (!t[0]) continue;
-                char line[100];
-                snprintf(line, sizeof(line), "· %.92s", t);
-                while (line[0] && ttf_text_width_px(ui_text_effective_px(24), line) > 280) {
-                    size_t n = strlen(line) - 1;
-                    while (n && ((unsigned char)line[n] & 0xc0) == 0x80) --n;
-                    line[n] = 0;
-                }
-                ui_text_vc(fb, todo.x + 20, GOAL_ALM_Y + 36 + row * GOAL_TODO_LINE_H, 24, line,
-                           EPD_DRAW_ALIGN_LEFT, false);
-                ++row;
-            }
+            epd_fill_circle(alm.x + 58, alm.y + 150, 17, NX8_INK, fb);
+            ui_text_vc(fb, alm.x + 58, alm.y + 150, 20, "宜", EPD_DRAW_ALIGN_CENTER, true);
+            epd_draw_circle(alm.x + 320, alm.y + 150, 17, NX8_INK, fb);
+            epd_draw_circle(alm.x + 320, alm.y + 150, 16, NX8_INK, fb);
+            ui_text_vc(fb, alm.x + 320, alm.y + 150, 20, "忌", EPD_DRAW_ALIGN_CENTER, false);
+            ui_text_vc(fb, alm.x + 90, alm.y + 152, 24, yi, EPD_DRAW_ALIGN_LEFT, false);
+            ui_text_vc(fb, alm.x + 352, alm.y + 152, 24, ji, EPD_DRAW_ALIGN_LEFT, false);
         }
     }
     /* ---- 目标设置行：− [数值 分钟] + （数字点阵 pitch9 缩小 1/3） ---- */
@@ -905,72 +871,6 @@ static void render_goal_panel(uint8_t* fb) {
     /* v6（2026-10-19 用户真机反馈）：阅读数据面板恢复底部导航栏（与其它页面一致），
      * 导航命中同步放开；编辑态由键盘覆盖导航区仍不画。 */
     ui_nav_draw(fb, 0);
-}
-
-/* ---- v7 备忘录整页编辑器（2026-10-19 用户“直接删除重做”，原 v5 实现因键盘不显示被弃） ----
- * 架构与天气编辑器完全同构：整页渲染键盘 + 事件后仅局部刷新（ui_keyboard_update，
- * settle 走整像素 GL16，布局切换 GL16，输入 DU），DONE/物理键保存前先冲刷未上屏组合。
- * 视觉保留 v5 定稿：输入区占满键盘上方（88..678）无边框大字 + 光标 `_`；
- * 键盘从屏幕最底部开始（top=694，背景框底贴屏底），不保留导航栏位置。 */
-#define TODO_BOX ((EpdRect){36, 88, 612, 678 - 88})
-static EpdRect s_todo_area;          /* 键盘局部刷新区 */
-static bool s_todo_layout, s_todo_settle;
-
-static void render_todo_text(uint8_t* fb) {
-    char text[100];
-    bool has = s_goal_edit_buf[0];
-    if (has) snprintf(text, sizeof(text), "%s", s_goal_edit_buf);
-    else snprintf(text, sizeof(text), "%s", "备忘录");
-    while (text[0] && ttf_text_width_px(ui_text_effective_px(28), text) > TODO_BOX.width - 64) {
-        size_t n = strlen(text) - 1;
-        while (n && ((unsigned char)text[n] & 0xc0) == 0x80) --n;
-        text[n] = 0;
-    }
-    snprintf(text + strlen(text), sizeof(text) - strlen(text), "%c", '_');
-    ui_text_vc(fb, TODO_BOX.x + 32, TODO_BOX.y + 56, 28, text, EPD_DRAW_ALIGN_LEFT, false);
-}
-
-static void render_todo_editor(uint8_t* fb) {
-    ui_fill_round_rect(fb, TODO_BOX, NX_R_CARD, NX8_PAPER);
-    ui_draw_control_frame(fb, TODO_BOX, NX_R_CARD, NX8_INK);
-    render_todo_text(fb);
-    ui_keyboard_draw(fb, 694);
-}
-
-/* 键盘局部刷新（与天气编辑器同构；输入区用大字样式回画，不复用标准输入框样式）。 */
-static app_redraw_t todo_editor_paint(app_ctx_t *ctx, bool force_field) {
-    ui_keyboard_update_t update = ui_keyboard_update(ctx->fb, 694, TODO_BOX, 28, false, NULL, force_field);
-    if (update.field) {
-        ui_clear_rect_fast(ctx->fb, TODO_BOX);
-        ui_fill_round_rect(ctx->fb, TODO_BOX, NX_R_CARD, NX8_PAPER);
-        ui_draw_control_frame(ctx->fb, TODO_BOX, NX_R_CARD, NX8_INK);
-        render_todo_text(ctx->fb);
-        update.area = ui_rect_union(update.area, TODO_BOX);
-    }
-    s_todo_area = update.area; s_todo_layout = update.layout; s_todo_settle = update.settle;
-    return update.area.width ? APP_REDRAW_AREA : APP_REDRAW_NONE;
-}
-
-/* 事件处理（与 wx_editor_gesture 同构）：键盘区 694 起，DONE=冲刷组合→保存→回面板。 */
-static app_redraw_t todo_editor_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
-    if (ev->type == UI_GESTURE_PRESS)
-        return ui_keyboard_press(ev->x0, ev->y0, 694, ctx->now_ms) ? todo_editor_paint(ctx, false) : APP_REDRAW_NONE;
-    bool feedback = ev->type != UI_GESTURE_LONG_PRESS && ui_keyboard_release();
-    if (ev->type == UI_GESTURE_SWIPE_L || ev->type == UI_GESTURE_SWIPE_R) {
-        bool page = ui_keyboard_page(ev->type == UI_GESTURE_SWIPE_L ? 1 : -1);
-        return (page || feedback) ? todo_editor_paint(ctx, false) : APP_REDRAW_NONE;
-    }
-    if (ev->type != UI_GESTURE_TAP) return feedback ? todo_editor_paint(ctx, false) : APP_REDRAW_NONE;
-    if (ev->y0 < 694) return APP_REDRAW_NONE;   /* 输入区无按钮 */
-    ui_keyboard_result_t result = ui_keyboard_tap(ev->x0, ev->y0, 694, ctx->now_ms);
-    if (result == UI_KEYBOARD_DONE) {
-        ui_keyboard_commit_pending();           /* 未上屏组合先选首选（不丢字） */
-        app_settings_set_todo(s_goal_edit, s_goal_edit_buf);
-        ui_keyboard_end();
-        s_goal_edit = -1;
-        return APP_REDRAW_PAGE;
-    }
-    return result == UI_KEYBOARD_CHANGED ? todo_editor_paint(ctx, false) : APP_REDRAW_NONE;
 }
 
 /* ============ 天气设置页（点击首页天气区进入，用户 2026-10-19） ============
@@ -1132,10 +1032,6 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         render_wx_setup(fb);
         return;
     }
-    if (s_goal_edit >= 0) {          /* 备忘录整页编辑器优先渲染；键盘覆盖导航区，不画导航 */
-        render_todo_editor(fb);
-        return;
-    }
     if (s_goal_open) {
         /* 用户 2026-10-19：数据界面无导航栏（原第十五批要求补齐）；退出走右键/中键。 */
         render_goal_panel(fb);
@@ -1168,18 +1064,6 @@ static bool present(app_ctx_t *ctx, app_redraw_t redraw) {
         guard_draw_result(ctx->hl, update_display_area_diff_with(ctx->hl,
             s_wx_layout ? &E0470_WAVEFORM : &E0470_FOLLOW_WAVEFORM,
             s_wx_layout ? MODE_GL16 : MODE_DU, s_wx_area));
-        return true;
-    }
-    /* 备忘录编辑：键盘局部刷新（与天气编辑器同构，2026-10-19 重做）。 */
-    if (redraw == APP_REDRAW_AREA && s_goal_edit >= 0) {
-        if (s_todo_settle) {
-            s_todo_settle = false;
-            guard_draw_result(ctx->hl, update_display_area_full_with(ctx->hl, &E0470_WAVEFORM, MODE_GL16, s_todo_area));
-            return true;
-        }
-        guard_draw_result(ctx->hl, update_display_area_diff_with(ctx->hl,
-            s_todo_layout ? &E0470_WAVEFORM : &E0470_FOLLOW_WAVEFORM,
-            s_todo_layout ? MODE_GL16 : MODE_DU, s_todo_area));
         return true;
     }
     render(ctx, ctx->fb);
@@ -1256,13 +1140,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
         ui_keyboard_result_t r = ui_keyboard_idle_tick(ctx->touch && ctx->touch->touched, ctx->now_ms);
         return r == UI_KEYBOARD_CHANGED ? wx_editor_paint(ctx, false) : APP_REDRAW_NONE;
     }
-    if (ctx->consumed || (ctx->touch && ctx->touch->touched
-        && !(s_goal_open && s_goal_edit >= 0))) return APP_REDRAW_NONE;
-    /* 备忘录编辑：候选窗空闲自动重绘（局部刷新，与天气一致）。 */
-    if (s_goal_open && s_goal_edit >= 0) {
-        ui_keyboard_result_t r = ui_keyboard_idle_tick(ctx->touch && ctx->touch->touched, ctx->now_ms);
-        return r == UI_KEYBOARD_CHANGED ? todo_editor_paint(ctx, false) : APP_REDRAW_NONE;
-    }
+    if (ctx->consumed || (ctx->touch && ctx->touch->touched)) return APP_REDRAW_NONE;
     /* 状态栏身份头像：解码完成后局部刷新状态栏（首帧/换头像后狐狸占位）。 */
     static bool s_avatar_wait;
     bool avatar_pending = nothing_statusbar_avatar_pending();
@@ -1346,7 +1224,12 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
 
 static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
     if (s_wx_edit >= 0) return wx_editor_gesture(ctx, ev);
-    if (s_goal_open && s_goal_edit >= 0) return todo_editor_gesture(ctx, ev);
+    /* v7（用户 2026-10-20）：左右滑动换主页面，效果与点按底部导航一致；
+     * 首页为最左页只左滑去书架；起点在导航热区（下沿上扩 16px）不触发。 */
+    if (ev->type == UI_GESTURE_SWIPE_L && ev->y0 < UI_NAV_TOUCH_TOP) {
+        ui_nav_request(ctx, 1);
+        return APP_REDRAW_NONE;
+    }
     if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
     /* v6：阅读数据面板恢复导航栏，导航带命中放开（点击切页离开面板自动收尾）；天气设置页保留。 */
     int tab = ui_nav_hit(ev->x0, ev->y0);
@@ -1378,34 +1261,8 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
                 if (ui_rect_hit(hit_r, ev->x0, ev->y0)) {
                     s_goal_sel_day = (d == tm_hit.tm_mday && cy0 == tm_hit.tm_year + 1900 &&
                                       cm0 == tm_hit.tm_mon + 1) ? 0 : d;
-                    if (s_goal_edit >= 0) { ui_keyboard_end(); s_goal_edit = -1; }
                     return APP_REDRAW_PAGE;
                 }
-            }
-        }
-        /* 备忘录：v6 整块区域（含标题/空白行）点击都进入输入界面——
-         * 命中条目行编辑该条；未命中则进首个空槽；三条全满进第一条。 */
-        {
-            int target = -1;
-            if (ui_rect_hit(goal_todo_rect(), ev->x0, ev->y0)) {
-                for (int i = 0; i < GOAL_TODO_ROWS; ++i)
-                    if (app_settings_todo(i)[0] && ui_rect_hit(goal_todo_line(i), ev->x0, ev->y0))
-                        { target = i; break; }
-                if (target < 0)
-                    for (int i = 0; i < GOAL_TODO_ROWS; ++i)
-                        if (!app_settings_todo(i)[0]) { target = i; break; }
-                if (target < 0) target = 0;
-            }
-            if (target >= 0) {
-    if (s_goal_edit >= 0 && s_goal_edit != target) {
-        ui_keyboard_commit_pending();
-        app_settings_set_todo(s_goal_edit, s_goal_edit_buf);
-    }
-                s_goal_edit = target;
-                snprintf(s_goal_edit_buf, sizeof(s_goal_edit_buf), "%s", app_settings_todo(target));
-                ui_text_edit_init(&s_goal_edit_input, s_goal_edit_buf, sizeof(s_goal_edit_buf));
-                ui_keyboard_begin(&s_goal_edit_input, false);
-                return APP_REDRAW_PAGE;
             }
         }
         bool plus = ui_rect_hit(goal_plus_rect(), ev->x0, ev->y0);
@@ -1450,14 +1307,6 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
         return wx_save_field(ctx);
     }
     if (s_wx_setup && key == UI_KEY_3) { s_wx_setup = false; return APP_REDRAW_PAGE; }
-    /* 备忘录编辑器：中键/右键均先冲刷组合再保存缓冲。 */
-    if (s_goal_edit >= 0) {
-        ui_keyboard_commit_pending();
-        app_settings_set_todo(s_goal_edit, s_goal_edit_buf);
-        ui_keyboard_end();
-        s_goal_edit = -1;
-        return APP_REDRAW_PAGE;
-    }
     /* 目标面板期间右键 = 关闭；首页本身是导航根页，按键停留。 */
     if (s_goal_open && key == UI_KEY_3) {
         s_goal_open = false;
@@ -1472,12 +1321,6 @@ static void home_on_exit(app_ctx_t* ctx) {
     (void)ctx;
     if (s_wx_edit >= 0) { ui_keyboard_end(); s_wx_edit = -1; }
     s_wx_setup = false;
-    if (s_goal_edit >= 0) {
-        ui_keyboard_commit_pending();
-        app_settings_set_todo(s_goal_edit, s_goal_edit_buf);
-        ui_keyboard_end();
-        s_goal_edit = -1;
-    }
     s_goal_open = false;
 }
 

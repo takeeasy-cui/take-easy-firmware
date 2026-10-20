@@ -6275,8 +6275,12 @@ static app_redraw_t gesture_event(app_ctx_t* ctx, const ui_gesture_event_t* ev) 
             if (direction && app_settings_book_orientation() == 2) direction = -direction;
             if (direction) { ctx->user_activity = true; return turn_page(ctx, direction); }
         } else if (s_view == SHELF && (ev->type == UI_GESTURE_SWIPE_L || ev->type == UI_GESTURE_SWIPE_R)) {
-            app_redraw_t result = shelf_turn_page(ctx, ev->type == UI_GESTURE_SWIPE_L ? 1 : -1);
-            if (result != APP_REDRAW_NONE) return result;
+            /* v7（用户 2026-10-20）：书架左右滑改为切换主页面（与导航按键等效）；
+             * 书架翻页改用底部箭头与蓝牙翻页器。起点在导航热区不触发。 */
+            if (ev->y0 < UI_NAV_TOUCH_TOP) {
+                ui_nav_request(ctx, ev->type == UI_GESTURE_SWIPE_L ? 2 : 0);
+                return APP_REDRAW_NONE;
+            }
         } else if ((s_view == BULK && !s_batch_confirm) &&
                    (ev->type == UI_GESTURE_SWIPE_U || ev->type == UI_GESTURE_SWIPE_D)) {
             return bulk_turn_page(ctx, ev->type == UI_GESTURE_SWIPE_U ? 1 : -1);

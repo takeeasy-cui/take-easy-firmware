@@ -703,8 +703,19 @@ void app_loop_run(const app_loop_config_t* config) {
             if (key >= 0 && current->owns_keys && !menu_open) {
                 app_redraw_t redraw = current->on_key && !(key == UI_KEY_2 && current->defer_middle_short)
                     ? current->on_key(&ctx, key) : APP_REDRAW_NONE;
-                present_page(&ctx, current, &gesture, redraw);
-                if (current->on_key_long && touch.count == 1) {
+                /* v2（用户 2026-10-20）：左键在无绑定的页面改为打开顶部快捷菜单（同下拉手势）；
+                 * on_key 返回 NONE 且无任何页面请求才算无功能。打开后吞掉本次按键接触，
+                 * 避免抬手被识别为点菜单外关闭。 */
+                if (key == UI_KEY_1 && redraw == APP_REDRAW_NONE && !s_quick.open && !power_dialog_open &&
+                    !ctx.request_app && !ctx.request_menu && !ctx.request_return) {
+                    ui_quick_menu_reset(&s_quick);
+                    s_quick.open = true;
+                    s_quick.swallow = true;
+                    quick_present(&ctx, current, false);
+                } else {
+                    present_page(&ctx, current, &gesture, redraw);
+                }
+                if (current->on_key_long && touch.count == 1 && !s_quick.open) {
                     held_key = key;
                     held_since_ms = ctx.now_ms;
                 }
@@ -728,7 +739,16 @@ void app_loop_run(const app_loop_config_t* config) {
                 app_redraw_t redraw = current->on_key ? current->on_key(&ctx, key) : APP_REDRAW_NONE;
                 if (redraw == APP_REDRAW_NONE)
                     ESP_LOGI(TAG, "KEY%d pressed, no action bound", key + 1);
-                present_page(&ctx, current, &gesture, redraw);
+                /* v2（用户 2026-10-20）：左键无绑定的页面打开顶部快捷菜单（同下拉手势）。 */
+                if (key == UI_KEY_1 && redraw == APP_REDRAW_NONE && !s_quick.open && !power_dialog_open &&
+                    !ctx.request_app && !ctx.request_menu && !ctx.request_return) {
+                    ui_quick_menu_reset(&s_quick);
+                    s_quick.open = true;
+                    s_quick.swallow = true;
+                    quick_present(&ctx, current, false);
+                } else {
+                    present_page(&ctx, current, &gesture, redraw);
+                }
             } else if (menu_open) {
                 int hit = ui_menu_hit_test(touch.x, touch.y, menu_leaf);
                 if (hit == UI_MENU_HIT_PREV || hit == UI_MENU_HIT_NEXT) {

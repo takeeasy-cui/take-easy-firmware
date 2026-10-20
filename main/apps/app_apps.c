@@ -163,6 +163,9 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
 }
 
 static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
+    /* v2（用户 2026-10-20）：左右滑动换主页面（与底部导航按键等效；起点在导航热区不触发）。 */
+    if (ev->type == UI_GESTURE_SWIPE_L && ev->y0 < UI_NAV_TOUCH_TOP) { ui_nav_request(ctx, 3); return APP_REDRAW_NONE; }
+    if (ev->type == UI_GESTURE_SWIPE_R && ev->y0 < UI_NAV_TOUCH_TOP) { ui_nav_request(ctx, 1); return APP_REDRAW_NONE; }
     if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
     int tab = ui_nav_hit(ev->x0, ev->y0);
     if (tab >= 0) { ui_nav_request(ctx, tab); return APP_REDRAW_NONE; }

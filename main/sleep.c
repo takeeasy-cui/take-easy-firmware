@@ -266,29 +266,24 @@ void app_lock_clock_art(uint8_t *fb) {
     int w = nothing_dot_text_w(cs, pitch);
     const int clock_top = 165;
     nothing_dot_text_rot(fb, (1216 - w) / 2, clock_top, cs, dr, pitch, 0x00);
-    /* 开关开启：时钟下方左老黄历（宜/忌）、右待办（首页阅读目标页录入） */
+    /* 开关开启：时钟下方老黄历。v5（用户 2026-10-20）：右侧待办列移除，
+     * 宜/忌改为左右两块居中——徽章样式与数据面板老黄历卡一致。
+     * 注意：lock fb 为竖屏原始坐标，圆按 (683-视觉y, 视觉x) 映射；文字走 lock_land_text 自带翻转。 */
     if (extras && ok) {
         char gz[32], lunar[48], yi[64], ji[64];
         lock_almanac_fields(tm_bj.tm_year + 1900, tm_bj.tm_mon + 1, tm_bj.tm_mday,
                             gz, sizeof(gz), lunar, sizeof(lunar), yi, sizeof(yi), ji, sizeof(ji));
-        /* v3（用户 2026-10-19）：历法头「丙午马年 · 九月初十」移至底部原提示位，
-         * 原「本模式下，设备不会关机」提示取消；宜/忌与待办行高对齐（500/554）。 */
-        lock_land_text(fb, 300, 500, 36, yi, 0x00);
-        lock_land_text(fb, 300, 554, 36, ji, 0x00);
-        int ty = 500;
-        for (int i = 0; i < 3; ++i) {
-            const char *t = app_settings_todo(i);
-            if (!t[0]) continue;
-            char line[72];
-            snprintf(line, sizeof(line), "· %.60s", t);
-            while (line[0] && ttf_text_width_px(36, line) > 440) {
-                size_t n = strlen(line) - 1;
-                while (n && ((unsigned char)line[n] & 0xc0) == 0x80) --n;
-                line[n] = 0;
-            }
-            lock_land_text(fb, 908, ty, 36, line, 0x00);
-            ty += 54;
-        }
+        int w_yi = ttf_text_width_px(26, yi);
+        int gx = 300 - (32 + 8 + w_yi) / 2;
+        epd_fill_circle(683 - 532, gx + 16, 16, 0x00, fb);
+        lock_land_text(fb, gx + 16, 532, 20, "宜", 0xFF);
+        lock_land_text(fb, gx + 40 + w_yi / 2, 534, 26, yi, 0x00);
+        int w_ji = ttf_text_width_px(26, ji);
+        int hx = 908 - (32 + 8 + w_ji) / 2;
+        epd_draw_circle(683 - 532, hx + 16, 16, 0x00, fb);
+        epd_draw_circle(683 - 532, hx + 16, 15, 0x00, fb);
+        lock_land_text(fb, hx + 16, 532, 20, "忌", 0x00);
+        lock_land_text(fb, hx + 40 + w_ji / 2, 534, 26, ji, 0x00);
         /* 底部：历法头（原提示位置）。v6（用户 2026-10-19 真机反馈）：字号与
          * 顶部日期一致 36（原 24 次级层级取消）。 */
         char head[112];

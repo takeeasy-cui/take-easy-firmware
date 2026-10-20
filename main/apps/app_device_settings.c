@@ -1228,11 +1228,13 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
             ui_draw_button(fb, upgrade_confirm_button(false), "取消", false);
             ui_draw_button(fb, upgrade_confirm_button(true), "确认升级", true);
         } else {
-            settings_card(fb, (EpdRect){36, 274, 612, 278}, 22, UI_GRAY_WHITE, 0x70);
+            /* v2（用户 2026-10-20）：候选包版本号行删除（卡上旧包显示 0.3.3-rc88 的来源），
+             * 卡片收窄 278→246，按钮上移；非 1.0 系列包由 ota_update.c 版本闸拒绝。 */
+            settings_card(fb, (EpdRect){36, 274, 612, 246}, 22, UI_GRAY_WHITE, 0x70);
             ui_text(fb, 60, 301, 29, "TF 卡升级", EPD_DRAW_ALIGN_LEFT, false);
-            ui_text(fb, 60, 354, 23, "升级包放在 TF 卡根目录", EPD_DRAW_ALIGN_LEFT, false);
-            ui_text(fb, 60, 404, 21, s_local_update.ready ? s_local_update.candidate_version : "把固件升级包放入 TF 卡根目录", EPD_DRAW_ALIGN_LEFT, false);
-            ui_draw_button(fb, (EpdRect){60, 468, 564, 62}, s_local_pending ? "正在安装，请勿断电" :
+            ui_text(fb, 60, 348, 23, "升级包放在 TF 卡根目录（Take Easy 1.0 系列）", EPD_DRAW_ALIGN_LEFT, false);
+            ui_text(fb, 60, 394, 21, s_local_update.ready ? "已找到可用升级包" : "把固件升级包放入 TF 卡根目录", EPD_DRAW_ALIGN_LEFT, false);
+            ui_draw_button(fb, (EpdRect){60, 424, 564, 62}, s_local_pending ? "正在安装，请勿断电" :
                 s_local_update.ready ? "安装 TF 卡升级包" : "重新检查 TF 卡", s_local_update.ready);
         }
         if (s_upgrade_notice[0]) ui_text(fb, 48, 660, 21, s_upgrade_notice, EPD_DRAW_ALIGN_LEFT, false);
@@ -1698,6 +1700,12 @@ static app_redraw_t scroll_gesture(const ui_gesture_event_t *ev, int *offset, in
 }
 
 static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
+    /* v2（用户 2026-10-20）：设置主页右滑返回应用页（与导航按键等效；设置为最末页）。
+     * 仅主列表页生效，二级页不换页；起点在导航热区不触发。 */
+    if (s_page == SETTINGS_MAIN && ev->type == UI_GESTURE_SWIPE_R && ev->y0 < UI_NAV_TOUCH_TOP) {
+        ui_nav_request(ctx, 2);
+        return APP_REDRAW_NONE;
+    }
     if (s_page==SETTINGS_SYSTEM_FONT && s_font_sync_confirm) {
         if (ev->type!=UI_GESTURE_TAP) return APP_REDRAW_NONE;
         for (int i=0;i<2;++i) {

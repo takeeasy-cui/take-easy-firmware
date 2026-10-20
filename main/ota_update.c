@@ -98,6 +98,14 @@ esp_err_t pico_ota_inspect(const char *path, pico_ota_info_t *info) {
         set_message(info->message, sizeof(info->message), "升级包不属于当前 take-easy 固件");
         return ESP_ERR_INVALID_RESPONSE;
     }
+    /* v2（用户 2026-10-20）：只接受 Take Easy 1.0 系列升级包——旧版（0.3.3-rcXX 等）
+     * 分区布局不同（无输入法码表分区、otadata 偏移不同），误刷会导致码表/存储错位。 */
+    char cand_ver[33] = {0};
+    memcpy(cand_ver, candidate.version, 32);
+    if (strncmp(cand_ver, "1.0", 3) != 0) {
+        set_message(info->message, sizeof(info->message), "升级包不是 Take Easy 1.0 系列，不适用");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
     if (!copy_field(info->candidate_version, sizeof(info->candidate_version), candidate.version,
                     sizeof(candidate.version))) {
         set_message(info->message, sizeof(info->message), "升级包版本信息无效");
