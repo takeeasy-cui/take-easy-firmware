@@ -380,6 +380,14 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
     return APP_REDRAW_NONE;
 }
 
+static app_redraw_t on_key_long(app_ctx_t *ctx, int key) {
+    /* 21g（用户反馈）：中键长按=退出回首页；编辑态先保存再退。 */
+    if (key != UI_KEY_2) return APP_REDRAW_NONE;
+    if (s_editing) (void)editor_finish();
+    ui_nav_request(ctx, 0);
+    return APP_REDRAW_NONE;
+}
+
 static app_redraw_t on_tick(app_ctx_t *ctx) {
     if (s_editing) {
         ui_keyboard_result_t r = ui_keyboard_idle_tick(ctx->touch && ctx->touch->touched, ctx->now_ms);
@@ -415,5 +423,6 @@ const app_desc_t app_notes = {
     .present = present,
     .on_gesture = on_gesture,
     .on_key = on_key,
+    .on_key_long = on_key_long,
     .on_tick = on_tick,
 };

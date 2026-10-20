@@ -80,11 +80,13 @@ esp_err_t app_settings_set_alarm(bool enabled, uint8_t hour, uint8_t minute);
 uint8_t app_settings_pomo_work(void);
 uint8_t app_settings_pomo_break(void);
 esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk);
-/* ---- 木鱼功德计数（累计，长按可重置）---- */
+/* ---- 木鱼功德计数（累计，长按可重置）----
+ * 21g：点击只改内存标脏，退出 app/首页时 flush 统一落盘（点击不再写 flash 卡顿）。 */
 uint32_t app_settings_muyu_count(void);
 void app_settings_set_muyu_count(uint32_t count);
-/// 木鱼音效（21f2，NVS muyu_s）：0=关 1=笃 2=曲谱 3=复音 4=尖锐 5=低沉。
-/// 音效集对齐官方 demo 固件（app_muyu.h）；木鱼 app 与首页 widget 共用。
+void app_settings_muyu_flush(void);
+/// 木鱼音效（21g 瘦身，NVS muyu_s）：0=关 1=笃 2=尖锐 3=低沉，全单音节 tone 直调
+/// （曲谱/复音异步任务音效因真机连续切换死机已删）。
 uint8_t app_settings_muyu_snd(void);
 void app_settings_set_muyu_snd(uint8_t snd);
 /* ---- 首页时钟行右组 widget（用户 2026-10-20 第二十一批 e 段，五选一）----

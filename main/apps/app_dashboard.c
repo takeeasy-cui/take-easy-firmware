@@ -544,7 +544,7 @@ static void draw_wx_muyu(uint8_t* fb) {
     const int cx = 548, cy = 224;
     epd_draw_circle(cx, cy, 33, NX8_INK, fb);
     epd_draw_circle(cx, cy, 32, NX8_INK, fb);
-    ui_fill_rect_fast((EpdRect){cx + 17, cy - 22, 20, 44}, 0xf0, fb);
+    ui_fill_rect_fast((EpdRect){cx + 17, cy - 22, 20, 44}, 0xFF, fb);
     nothing_thick_line(fb, cx + 17, cy - 22, cx + 17, cy + 22, 3, NX8_INK);
     epd_fill_circle(cx - 9, cy - 20, 5, NX8_INK, fb);
     nothing_thick_line(fb, cx + 29, cy + 26, cx + 44, cy + 34, 7, NX8_INK);
@@ -1718,6 +1718,11 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
         if (zone == 2) {
             app_settings_set_muyu_count(app_settings_muyu_count() + 1);
             app_muyu_snd_play();          /* 21f2：与木鱼 app 共用音效设置（含关） */
+            /* 21g（真机反馈 widget 点击慢）：AREA 只推屏不调 render（21f 机制），旧版 fb
+             * 从未重画致点击后数字不变；且 set_muyu_count 已不写 flash（退出统一落盘）。
+             * 清底重画本组，数字立即上屏。 */
+            epd_fill_rect(HOME_WX_AREA, NX8_PAPER, ctx->fb);
+            draw_wx_muyu(ctx->fb);
             s_area = HOME_WX_AREA;
             return APP_REDRAW_AREA;
         }
@@ -1771,6 +1776,7 @@ static void home_on_exit(app_ctx_t* ctx) {
     s_wx_pick = false;
     s_wx_img_pick = false;
     s_goal_open = false;
+    app_settings_muyu_flush();    /* 21g：首页 widget 敲击计数退出时统一落盘 */
 }
 
 static bool home_main_visible(app_ctx_t *ctx) { (void)ctx; return true; }

@@ -50,7 +50,7 @@
 #define NVS_KEY_POMO_WORK   "pomo_w"
 #define NVS_KEY_POMO_BREAK  "pomo_b"
 #define NVS_KEY_MUYU_COUNT  "muyu_c"
-#define NVS_KEY_MUYU_SND    "muyu_s"   /* 21f2：木鱼音效 0=关 1=笃 2=曲谱 3=复音 4=尖锐 5=低沉 */
+#define NVS_KEY_MUYU_SND    "muyu_s"   /* 21g：木鱼音效 0=关 1=笃 2=尖锐 3=低沉（全单音节） */
 /* 首页时钟行右组 widget 五选一（第二十一批 e 段）与自定义文字。 */
 #define NVS_KEY_CLOCK_WIDGET "wx_zone"
 #define NVS_KEY_CLOCK_TEXT   "wx_text"
@@ -140,7 +140,8 @@ static uint8_t s_alarm_hour, s_alarm_minute;
 static uint8_t s_pomo_work = 25;        /* 番茄专注时长（15..60，步进 5） */
 static uint8_t s_pomo_break = 5;        /* 番茄休息时长（5..60，步进 5） */
 static uint32_t s_muyu_count;           /* 木鱼功德累计 */
-static uint8_t s_muyu_snd = 1;          /* 木鱼音效（21f2，默认「笃」）*/
+static bool s_muyu_dirty;              /* 21g：计数未落盘标记（点击高频，退出统一写） */
+static uint8_t s_muyu_snd = 1;          /* 木鱼音效（21g 瘦身为 0..3，默认「笃」）*/
 static uint8_t s_clock_widget;          /* 首页时钟行右组：0=天气 1=黄历 2=木鱼 3=图片 4=文字 */
 static char s_clock_text[72];           /* 自定义文字（widget 4）*/
 static char s_clock_pic[80];            /* 自定义图片文件名（widget 3，TF 卡根目录；空=homepic.png）*/
@@ -262,7 +263,7 @@ void app_settings_init(void) {
         uint32_t count = 0;
         if (nvs_get_u32(h, NVS_KEY_MUYU_COUNT, &count) == ESP_OK) s_muyu_count = count;
         uint8_t snd = 1;
-        if (nvs_get_u8(h, NVS_KEY_MUYU_SND, &snd) == ESP_OK && snd <= 5) s_muyu_snd = snd;
+        if (nvs_get_u8(h, NVS_KEY_MUYU_SND, &snd) == ESP_OK && snd <= 3) s_muyu_snd = snd;
         uint8_t zone = 0;
         if (nvs_get_u8(h, NVS_KEY_CLOCK_WIDGET, &zone) == ESP_OK && zone <= 4) s_clock_widget = zone;
     }
@@ -934,17 +935,24 @@ esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk) {
 }
 uint32_t app_settings_muyu_count(void) { return s_muyu_count; }
 void app_settings_set_muyu_count(uint32_t count) {
+    /* 21g（真机反馈 widget 点击慢）：点击高频不再每次写 flash——只改内存标脏，
+     * 由 app/首页退出时 app_settings_muyu_flush() 统一落盘（丢电最多丢未退出段）。 */
     if (s_muyu_count == count) return;
     s_muyu_count = count;
+    s_muyu_dirty = true;
+}
+void app_settings_muyu_flush(void) {
+    if (!s_muyu_dirty) return;
+    s_muyu_dirty = false;
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    if (nvs_set_u32(h, NVS_KEY_MUYU_COUNT, count) == ESP_OK) (void)nvs_commit(h);
+    if (nvs_set_u32(h, NVS_KEY_MUYU_COUNT, s_muyu_count) == ESP_OK) (void)nvs_commit(h);
     nvs_close(h);
 }
-/* ---- 木鱼音效（21f2，0=关 1=笃 2=曲谱 3=复音 4=尖锐 5=低沉）---- */
+/* ---- 木鱼音效（21g，0=关 1=笃 2=尖锐 3=低沉，全单音节 tone 直调）---- */
 uint8_t app_settings_muyu_snd(void) { return s_muyu_snd; }
 void app_settings_set_muyu_snd(uint8_t snd) {
-    if (snd > 5 || snd == s_muyu_snd) return;
+    if (snd > 3 || snd == s_muyu_snd) return;
     s_muyu_snd = snd;
     nvs_put_u8(NVS_KEY_MUYU_SND, snd);
 }

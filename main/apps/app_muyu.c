@@ -6,8 +6,10 @@
  *  - 长按木鱼：重置确认（点阵风格几何自绘木鱼：圆身 + 前开口 + 圆点眼 + 槌）；
  *  - 计数持久化 NVS（muyu_c，u32）；官方「设定→重置木鱼计数」在此内置为长按。
  * 21f2（2026-10-20 用户拍板）：音效开关 + 音效选择——主页底部全宽按钮
- *  「音效 · XXX」点击循环 关→笃→曲谱→复音→尖锐→低沉，切换即试听；
- *  音效集对齐官方 demo 固件（app_sd.c 同源），首页 widget 敲击共用同一设置。
+ *  「音效 · XXX」点击循环切换，切换即试听；首页 widget 敲击共用同一设置。
+ * 21g（真机反馈）：曲谱/复音异步任务音效连续切换试听死机，删除——只留单音节
+ *  关/笃/尖锐/低沉（全 tone 阻塞直调）；中键长按=退出回首页；功德计数点击只改
+ *  内存、退出统一落盘（根治每次点击写 NVS 卡顿）。
  */
 #include <stdio.h>
 
@@ -18,6 +20,7 @@
 #include "ui_gesture.h"
 #include "ui_kit.h"
 #include "ui_menu.h"
+#include "ui_nav.h"
 #include "ui_nothing.h"
 
 #define MUYU_DISPLAY_CAP 999999
@@ -33,20 +36,20 @@ static bool s_confirm_reset;
 /* 21f：敲击局部自绘计数区（定义在 on_gesture 之后，先声明）。 */
 static void muyu_paint_count(uint8_t* fb);
 
-/* ---- 21f2：音效选择（官方 demo 固件音效集，见 app_muyu.h 注释）---- */
+/* ---- 21g：音效选择（全单音节 tone 直调）----
+ * 21f2 版含曲谱（score_play）/复音（1bit RMT）异步任务音效，真机连续切换试听
+ * 死机，用户拍板删除；只留单音节，全部 read_pico_buzzer_tone 阻塞直调。 */
 const char *app_muyu_snd_name(uint8_t snd) {
-    static const char *const k_names[6] = {"关", "笃", "曲谱", "复音", "尖锐", "低沉"};
-    return snd < 6 ? k_names[snd] : k_names[0];
+    static const char *const k_names[4] = {"关", "笃", "尖锐", "低沉"};
+    return snd < 4 ? k_names[snd] : k_names[0];
 }
 
 void app_muyu_snd_play(void) {
     switch (app_settings_muyu_snd()) {
-        case 1: read_pico_buzzer_tone(1800, 80); break;                      /* 笃（21c 默认单音） */
-        case 2: read_pico_buzzer_score_play(); break;                        /* 曲谱（官方 Score） */
-        case 3: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_1BIT); break;  /* 复音（官方 1bit） */
-        case 4: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_4K); break;    /* 尖锐（官方 4k） */
-        case 5: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_A_15K); break; /* 低沉（官方 1.5k） */
-        default: break;                                                      /* 关 */
+        case 1: read_pico_buzzer_tone(1800, 80); break;   /* 笃（21c 默认单音） */
+        case 2: read_pico_buzzer_tone(4000, 80); break;   /* 尖锐 */
+        case 3: read_pico_buzzer_tone(1500, 80); break;   /* 低沉 */
+        default: break;                                  /* 关 */
     }
 }
 
@@ -109,8 +112,8 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
         return APP_REDRAW_NONE;
     }
     if (ev->type == UI_GESTURE_TAP && ui_rect_hit(snd_btn(), ev->x0, ev->y0)) {
-        /* 21f2：音效循环 关→笃→曲谱→复音→尖锐→低沉→关，切换即试听。 */
-        app_settings_set_muyu_snd((uint8_t)((app_settings_muyu_snd() + 1) % 6));
+        /* 21g：音效循环 关→笃→尖锐→低沉→关，切换即试听（全单音节，无死机源）。 */
+        app_settings_set_muyu_snd((uint8_t)((app_settings_muyu_snd() + 1) % 4));
         app_muyu_snd_play();
         return APP_REDRAW_PAGE;
     }
@@ -139,6 +142,12 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
     return APP_REDRAW_NONE;          /* 左键无绑定 → 全局快捷菜单 */
 }
 
+static app_redraw_t on_key_long(app_ctx_t* ctx, int key) {
+    /* 21g（用户反馈）：中键长按=退出回首页（同设置页惯例）。 */
+    if (key == UI_KEY_2) ui_nav_request(ctx, 0);
+    return APP_REDRAW_NONE;
+}
+
 /* 21f：敲击自绘计数区（APP_REDRAW_AREA 框架只推屏不调 render，回调自己画）。 */
 static void muyu_paint_count(uint8_t* fb) {
     epd_fill_rect((EpdRect){36, 230, 612, 230}, NX8_PAPER, fb);
@@ -157,7 +166,11 @@ static EpdRect area_hint(app_ctx_t* ctx) {
     return (EpdRect){36, 230, 612, 230};
 }
 
-static void muyu_on_exit(app_ctx_t* ctx) { (void)ctx; s_confirm_reset = false; }
+static void muyu_on_exit(app_ctx_t* ctx) {
+    (void)ctx;
+    s_confirm_reset = false;
+    app_settings_muyu_flush();   /* 21g：功德计数点击只改内存，退出时统一落盘。 */
+}
 static bool always_visible(app_ctx_t* ctx) { (void)ctx; return !s_confirm_reset; }
 
 const app_desc_t app_muyu = {
@@ -170,5 +183,6 @@ const app_desc_t app_muyu = {
     .render = render,
     .on_gesture = on_gesture,
     .on_key = on_key,
+    .on_key_long = on_key_long,
     .area_hint = area_hint,
 };

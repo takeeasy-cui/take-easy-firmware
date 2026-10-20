@@ -1,13 +1,10 @@
 /*
- * 木鱼音效（用户 2026-10-20 21f2 拍板：音效开关 + 音效选择）。
- * 音效集对齐官方 demo 固件「TF 卡与蜂鸣器」页（app_sd.c 同源 API）：
- *   1=笃（单音 tone 1800Hz/80ms，21c 起的默认「笃」声）
- *   2=曲谱（read_pico_buzzer_score_play，官方「曲谱 Score」）
- *   3=复音（PROBE_1BIT，官方 1bit 多声部）
- *   4=尖锐（PROBE_4K，官方 4k）
- *   5=低沉（PROBE_A_15K，官方 1.5k 经典方波）
- *   0=关（静默）
- * 设置存 NVS（settings：muyu_snd/s），木鱼 app 与首页 widget 共用。
+ * 木鱼音效（用户 2026-10-20 21f2 拍板：音效开关 + 音效选择；21g 瘦身）。
+ * 21g（真机反馈连续切换死机）：曲谱（score_play 异步任务）/复音（1bit RMT）等
+ * 官方 demo 音效删除，只留单音节、全部 read_pico_buzzer_tone 阻塞直调：
+ *   0=关（静默） 1=笃（1800Hz/80ms，21c 起默认）
+ *   2=尖锐（4000Hz/80ms） 3=低沉（1500Hz/80ms）
+ * 设置存 NVS（settings：muyu_s，0..3），木鱼 app 与首页 widget 共用。
  */
 #pragma once
 

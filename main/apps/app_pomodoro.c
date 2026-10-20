@@ -25,6 +25,7 @@
 #include "ui_gesture.h"
 #include "ui_kit.h"
 #include "ui_menu.h"
+#include "ui_nav.h"
 #include "ui_nothing.h"
 
 typedef enum { VIEW_MAIN = 0, VIEW_SETUP } pomo_view_t;
@@ -218,6 +219,12 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
     return APP_REDRAW_NONE;          /* 左键无绑定 → 全局快捷菜单 */
 }
 
+static app_redraw_t on_key_long(app_ctx_t* ctx, int key) {
+    /* 21g（用户反馈）：中键长按=退出回首页；计时按切页离开=暂停语义自动暂停。 */
+    if (key == UI_KEY_2) ui_nav_request(ctx, 0);
+    return APP_REDRAW_NONE;
+}
+
 /* 主页分钟自绘（21f 根因修复）：APP_REDRAW_AREA 只推屏不调 render，
  * 回调必须自己把数字区画好——擦旧迹再画新点阵数字，几何与 render_main 一致。 */
 static void pomo_paint_minutes(uint8_t* fb, int minutes) {
@@ -301,6 +308,7 @@ const app_desc_t app_pomodoro = {
     .render = render,
     .on_gesture = on_gesture,
     .on_key = on_key,
+    .on_key_long = on_key_long,
     .on_tick = on_tick,
     .area_hint = area_hint,
 };
