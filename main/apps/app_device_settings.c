@@ -170,8 +170,8 @@ static app_redraw_t apply_lock_style_gated(app_ctx_t *ctx, uint8_t style) {
     if (style > 3 || style == app_settings_lock_style()) return APP_REDRAW_NONE;
 if (app_settings_lock_style() == 3 && style != 3 &&
         lock_pin_enabled() && app_settings_pin_calc_bound()) {
+        s_pin_style_after = style;
         pin_setup_open(ctx, true);
-        s_pin_style_after = style;   /* 在 open 之后设置：open 内的 close 会清标志 */
         return APP_REDRAW_PAGE;
     }
     app_settings_set_lock_style(style);
@@ -2033,8 +2033,8 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
                 return APP_REDRAW_PAGE;
             }
 if (!lock_pin_enabled()) {
+                s_pin_for_lock_style = true;
                 pin_setup_open(ctx, false);
-                s_pin_for_lock_style = true;   /* 在 open 之后设置：open 内的 close 会清标志 */
                 return APP_REDRAW_PAGE;
             }
             app_settings_set_lock_style(3);
