@@ -112,6 +112,7 @@ static char s_cached_books_dir[128];
 static char s_cached_last_path[BOOK_STORE_PATH_MAX];
 static uint32_t s_cached_progress_revision = UINT32_MAX;
 static EpdRect s_area;
+static bool s_area_bw;   /* 21k：AREA 内容纯黑白且回调已自绘（木鱼 widget 敲击）→ DU 快刷直推 */
 static bool s_home_force_full_once;
 /* 阅读数据：近 30 天每日秒数（最早到今天）。 */
 static uint32_t s_reading_days[30];
@@ -1468,6 +1469,16 @@ static bool present(app_ctx_t *ctx, app_redraw_t redraw) {
             s_wx_layout ? MODE_GL16 : MODE_DU, s_wx_area));
         return true;
     }
+    /* 21k（真机反馈 widget 比应用内明显迟钝）：木鱼 widget 敲击区由回调自绘且内容纯黑白
+     * （白底+点阵数字+墨线，无灰阶），跳过整页 render 的重画时间，直接 DU 差分快刷——
+     * 与木鱼 app 内敲击同档（框架默认 AREA=APP_DYNAMIC_REFRESH_MODE=DU），
+     * 数字上屏与连点音效节奏对齐应用内。自绘输出与 render 在本区逐像素一致。 */
+    if (redraw == APP_REDRAW_AREA && s_area_bw) {
+        s_area_bw = false;
+        guard_draw_result(ctx->hl, update_display_area_diff_with(ctx->hl,
+            &E0470_FOLLOW_WAVEFORM, MODE_DU, s_area));
+        return true;
+    }
     render(ctx, ctx->fb);
     enum EpdDrawError result;
     if (redraw == APP_REDRAW_AREA)
@@ -1723,6 +1734,7 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
              * 清底重画本组，数字立即上屏。 */
             epd_fill_rect(HOME_WX_AREA, NX8_PAPER, ctx->fb);
             draw_wx_muyu(ctx->fb);
+            s_area_bw = true;            /* 21k：纯黑白自绘区，present 走 DU 快刷并跳过整页 render */
             s_area = HOME_WX_AREA;
             return APP_REDRAW_AREA;
         }
