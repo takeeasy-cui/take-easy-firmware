@@ -5,10 +5,14 @@
  *  - 功德计数用时间同款点阵数字（用户 2026-10-20 拍板）；
  *  - 长按木鱼：重置确认（点阵风格几何自绘木鱼：圆身 + 前开口 + 圆点眼 + 槌）；
  *  - 计数持久化 NVS（muyu_c，u32）；官方「设定→重置木鱼计数」在此内置为长按。
+ * 21f2（2026-10-20 用户拍板）：音效开关 + 音效选择——主页底部全宽按钮
+ *  「音效 · XXX」点击循环 关→笃→曲谱→复音→尖锐→低沉，切换即试听；
+ *  音效集对齐官方 demo 固件（app_sd.c 同源），首页 widget 敲击共用同一设置。
  */
 #include <stdio.h>
 
 #include "app.h"
+#include "app_muyu.h"
 #include "read_pico_buzzer.h"
 #include "settings.h"
 #include "ui_gesture.h"
@@ -22,10 +26,29 @@
 static EpdRect muyu_zone(void) { return (EpdRect){120, 470, 460, 380}; }
 /* 重置确认按钮。 */
 static EpdRect confirm_btn(bool accept) { return (EpdRect){accept ? 36 : 352, 940, 296, 84}; }
+/* 21f2：音效选择按钮（全宽，点击循环切换并试听）。 */
+static EpdRect snd_btn(void) { return (EpdRect){36, 940, 612, 84}; }
 
 static bool s_confirm_reset;
 /* 21f：敲击局部自绘计数区（定义在 on_gesture 之后，先声明）。 */
 static void muyu_paint_count(uint8_t* fb);
+
+/* ---- 21f2：音效选择（官方 demo 固件音效集，见 app_muyu.h 注释）---- */
+const char *app_muyu_snd_name(uint8_t snd) {
+    static const char *const k_names[6] = {"关", "笃", "曲谱", "复音", "尖锐", "低沉"};
+    return snd < 6 ? k_names[snd] : k_names[0];
+}
+
+void app_muyu_snd_play(void) {
+    switch (app_settings_muyu_snd()) {
+        case 1: read_pico_buzzer_tone(1800, 80); break;                      /* 笃（21c 默认单音） */
+        case 2: read_pico_buzzer_score_play(); break;                        /* 曲谱（官方 Score） */
+        case 3: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_1BIT); break;  /* 复音（官方 1bit） */
+        case 4: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_4K); break;    /* 尖锐（官方 4k） */
+        case 5: read_pico_buzzer_probe(READ_PICO_BUZZER_PROBE_A_15K); break; /* 低沉（官方 1.5k） */
+        default: break;                                                      /* 关 */
+    }
+}
 
 static void draw_muyu(uint8_t* fb) {
     /* 圆身（双线描边）+ 前开口（右侧白块擦出）+ 圆点眼 + 斜置槌。 */
@@ -55,6 +78,11 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
     nothing_dot_text(fb, (684 - w) / 2, 240, cs, dr, pitch, NX8_INK);
     draw_muyu(fb);
     ui_text_vc(fb, 342, 890, 24, "点击木鱼 · 长按重置计数", EPD_DRAW_ALIGN_CENTER, false);
+    /* 21f2：音效选择按钮（显示当前音效名，点击循环切换）。 */
+    char slabel[40];
+    snprintf(slabel, sizeof(slabel), "音效 · %s",
+             app_muyu_snd_name(app_settings_muyu_snd()));
+    ui_draw_button(fb, snd_btn(), slabel, false);
     if (s_confirm_reset) {
         /* 重置确认（便签删除确认同款：白底卡 + 双按钮）。 */
         EpdRect card = {66, 880, 552, 180};
@@ -80,10 +108,16 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
         }
         return APP_REDRAW_NONE;
     }
+    if (ev->type == UI_GESTURE_TAP && ui_rect_hit(snd_btn(), ev->x0, ev->y0)) {
+        /* 21f2：音效循环 关→笃→曲谱→复音→尖锐→低沉→关，切换即试听。 */
+        app_settings_set_muyu_snd((uint8_t)((app_settings_muyu_snd() + 1) % 6));
+        app_muyu_snd_play();
+        return APP_REDRAW_PAGE;
+    }
     if (!ui_rect_hit(muyu_zone(), ev->x0, ev->y0)) return APP_REDRAW_NONE;
     if (ev->type == UI_GESTURE_TAP) {
         app_settings_set_muyu_count(app_settings_muyu_count() + 1);
-        read_pico_buzzer_tone(1800, 80);          /* 「笃」 */
+        app_muyu_snd_play();               /* 21f2：按当前音效设置发声（含关） */
         /* 21f：APP_REDRAW_AREA 只推屏不调 render，回调自己画计数区再返回。 */
         muyu_paint_count(ctx->fb);
         return APP_REDRAW_AREA;

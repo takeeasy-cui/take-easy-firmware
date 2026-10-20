@@ -184,7 +184,9 @@ static void render_editor(uint8_t *fb) {
     epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
     ui_text_vc(fb, 342, 106, 34, s_edit_new ? "新建便签" : "编辑便签", EPD_DRAW_ALIGN_CENTER, false);
-    ui_text(fb, 642, 128, 24, "完成", EPD_DRAW_ALIGN_RIGHT, false);
+    /* 21f2（真机反馈）：完成按钮原 y=128 底沿 152 与输入框边框顶 150 重叠 2px——
+     * 上移到 112（底沿 136，与边框留 14px）；命中区同步收紧到 y<148 避开框角。 */
+    ui_text(fb, 642, 112, 24, "完成", EPD_DRAW_ALIGN_RIGHT, false);
     EpdRect box = notes_box();
     ui_fill_round_rect(fb, box, NX_R_CARD, NX8_PAPER);
     ui_draw_control_frame(fb, box, NX_R_CARD, NX8_INK);
@@ -225,7 +227,7 @@ static app_redraw_t editor_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev)
         return (page || feedback) ? editor_paint(ctx, false) : APP_REDRAW_NONE;
     }
     if (ev->type != UI_GESTURE_TAP) return feedback ? editor_paint(ctx, false) : APP_REDRAW_NONE;
-    if (ev->y0 < 160 && ev->x0 > 510) return editor_finish();    /* 「完成」 */
+    if (ev->y0 < 148 && ev->x0 > 510) return editor_finish();    /* 「完成」 */
     ui_keyboard_result_t result = ui_keyboard_tap(ev->x0, ev->y0, 694, ctx->now_ms);
     if (result == UI_KEYBOARD_DONE) return editor_finish();
     return result == UI_KEYBOARD_CHANGED ? editor_paint(ctx, false) : APP_REDRAW_NONE;

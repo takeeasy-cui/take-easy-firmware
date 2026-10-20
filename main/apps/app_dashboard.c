@@ -29,6 +29,7 @@
 
 #include "app.h"
 #include "app_content_open.h"
+#include "app_muyu.h"
 #include "app_registry.h"
 #include "boot_state.h"
 #include "book_cover.h"
@@ -518,42 +519,48 @@ static void draw_wx_almanac(uint8_t* fb, bool ok, const struct tm* tm_bj) {
     goal_almanac_chars_two(gz, lunar, yi, ji,
                            tm_bj->tm_year + 1900, tm_bj->tm_mon + 1, tm_bj->tm_mday);
     char fit[80];
-    epd_fill_circle(521, 162, 12, NX8_INK, fb);
-    ui_text_vc(fb, 521, 162, 14, "宜", EPD_DRAW_ALIGN_CENTER, true);
-    wx_fit_text(fit, sizeof(fit), yi, 16, 84);
-    ui_text_vc(fb, 541, 162, 16, fit, EPD_DRAW_ALIGN_LEFT, false);
-    epd_draw_circle(521, 232, 12, NX8_INK, fb);
-    epd_draw_circle(521, 232, 11, NX8_INK, fb);
-    ui_text_vc(fb, 521, 232, 14, "忌", EPD_DRAW_ALIGN_CENTER, false);
-    wx_fit_text(fit, sizeof(fit), ji, 16, 84);
-    ui_text_vc(fb, 541, 232, 16, fit, EPD_DRAW_ALIGN_LEFT, false);
+    /* 21f2（真机反馈）：字体变大——徽章 r12→r14、宜/忌 14→16px；条目 16→20px（截宽 84 不变）。 */
+    epd_fill_circle(519, 162, 14, NX8_INK, fb);
+    ui_text_vc(fb, 519, 162, 16, "宜", EPD_DRAW_ALIGN_CENTER, true);
+    wx_fit_text(fit, sizeof(fit), yi, 20, 84);
+    ui_text_vc(fb, 541, 162, 20, fit, EPD_DRAW_ALIGN_LEFT, false);
+    epd_draw_circle(519, 232, 14, NX8_INK, fb);
+    epd_draw_circle(519, 232, 13, NX8_INK, fb);
+    ui_text_vc(fb, 519, 232, 16, "忌", EPD_DRAW_ALIGN_CENTER, false);
+    wx_fit_text(fit, sizeof(fit), ji, 20, 84);
+    ui_text_vc(fb, 541, 232, 20, fit, EPD_DRAW_ALIGN_LEFT, false);
 }
 
 static void draw_wx_muyu(uint8_t* fb) {
-    /* 小木鱼（圆身+开口+槌）+ 点阵功德数（与 app 同源计数）。 */
-    const int cx = 548, cy = 178;
-    epd_draw_circle(cx, cy, 27, NX8_INK, fb);
-    epd_draw_circle(cx, cy, 26, NX8_INK, fb);
-    ui_fill_rect_fast((EpdRect){cx + 14, cy - 18, 16, 36}, 0xf0, fb);
-    nothing_thick_line(fb, cx + 14, cy - 18, cx + 14, cy + 18, 2, NX8_INK);
-    epd_fill_circle(cx - 7, cy - 16, 4, NX8_INK, fb);
-    nothing_thick_line(fb, cx + 24, cy + 22, cx + 38, cy + 30, 6, NX8_INK);
-    epd_fill_circle(cx + 40, cy + 31, 8, NX8_INK, fb);
+    /* 21f2（用户拍板）：数字在上（小，pitch 7），木鱼图在下（大，r33）；
+     * 数字点阵高 7*pitch=49（y 126..175），圆身 191..257，槌收在 268 内。 */
     uint32_t c = app_settings_muyu_count();
     if (c > 99999) c = 99999;
     char cs[12];
     snprintf(cs, sizeof(cs), "%u", (unsigned)c);
-    const int pitch = 8, dr = 3;
+    const int pitch = 7, dr = 3;
     int w = nothing_dot_text_w(cs, pitch);
-    nothing_dot_text(fb, 565 - w / 2, 248, cs, dr, pitch, NX8_INK);
+    nothing_dot_text(fb, 565 - w / 2, 126, cs, dr, pitch, NX8_INK);
+    const int cx = 548, cy = 224;
+    epd_draw_circle(cx, cy, 33, NX8_INK, fb);
+    epd_draw_circle(cx, cy, 32, NX8_INK, fb);
+    ui_fill_rect_fast((EpdRect){cx + 17, cy - 22, 20, 44}, 0xf0, fb);
+    nothing_thick_line(fb, cx + 17, cy - 22, cx + 17, cy + 22, 3, NX8_INK);
+    epd_fill_circle(cx - 9, cy - 20, 5, NX8_INK, fb);
+    nothing_thick_line(fb, cx + 29, cy + 26, cx + 44, cy + 34, 7, NX8_INK);
+    epd_fill_circle(cx + 46, cy + 35, 9, NX8_INK, fb);
 }
 
 static void wx_img_load(void) {
-    /* 懒解码一次（gray+alpha 双平面 120×150，PSRAM）；卡重挂载后失效重读。 */
+    /* 懒解码一次（gray+alpha 双平面 120×150，PSRAM）；卡重挂载/换图后失效重读。 */
     if (s_wx_img_ok) return;
     if (!s_wx_img) s_wx_img = heap_caps_malloc((size_t)120 * 150 * 2, MALLOC_CAP_SPIRAM);
     if (!s_wx_img) return;
-    s_wx_img_ok = book_image_file_cover_layer("/sdcard/homepic.png", 120, 150,
+    /* 21f2：文件名来自设置（选择页写入）；空串回退默认 homepic.png。 */
+    const char *pic = app_settings_clock_pic();
+    char path[96];
+    snprintf(path, sizeof(path), "/sdcard/%s", pic[0] ? pic : "homepic.png");
+    s_wx_img_ok = book_image_file_cover_layer(path, 120, 150,
                                               s_wx_img, s_wx_img + (size_t)120 * 150);
 }
 
@@ -561,8 +568,8 @@ static void draw_wx_image(uint8_t* fb) {
     wx_img_load();
     if (!s_wx_img_ok) {
         ui_text_vc(fb, 565, 172, 18, "放一张 PNG 到", EPD_DRAW_ALIGN_CENTER, false);
-        ui_text_vc(fb, 565, 218, 15, "/sdcard/homepic.png", EPD_DRAW_ALIGN_CENTER, false);
-        ui_text_vc(fb, 565, 258, 13, "透明处透出底色", EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 565, 218, 15, "TF 卡根目录", EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 565, 258, 13, "长按本区选择图片", EPD_DRAW_ALIGN_CENTER, false);
         return;
     }
     const uint8_t *gray = s_wx_img, *alpha = s_wx_img + (size_t)120 * 150;
@@ -582,7 +589,8 @@ static void draw_wx_image(uint8_t* fb) {
 }
 
 static void draw_wx_text(uint8_t* fb) {
-    /* 自定义文字两行 24px 居中；按宽度截断到 116px（约 4 字/行）。 */
+    /* 21f2（真机反馈）：字体加大 24→28px、字数上限 24→8 汉字（两行大字）；
+     * 折行按真实渲染宽度截到 116px（28px 汉字约 4 字/行）。 */
     const char *t = app_settings_clock_text();
     if (!t[0]) { ui_text_vc(fb, 565, 196, 16, "长按设置文字", EPD_DRAW_ALIGN_CENTER, false); return; }
     char line1[40] = {0}, line2[40] = {0};
@@ -596,7 +604,7 @@ static void draw_wx_text(uint8_t* fb) {
             memcpy(dst + used, p, ch);
             used += ch;
             p += ch;
-            if (ttf_text_width_px(ui_text_effective_px(24), dst) > 116) {
+            if (ttf_text_width_px(ui_text_effective_px(28), dst) > 116) {
                 /* 当前行再加一个字就超宽：回退这个字并收行。 */
                 used -= ch;
                 dst[used] = 0;
@@ -605,8 +613,8 @@ static void draw_wx_text(uint8_t* fb) {
         }
         dst[used] = 0;
     }
-    ui_text_vc(fb, 565, line2[0] ? 168 : 196, 24, line1, EPD_DRAW_ALIGN_CENTER, false);
-    if (line2[0]) ui_text_vc(fb, 565, 222, 24, line2, EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 565, line2[0] ? 164 : 192, 28, line1, EPD_DRAW_ALIGN_CENTER, false);
+    if (line2[0]) ui_text_vc(fb, 565, 220, 28, line2, EPD_DRAW_ALIGN_CENTER, false);
 }
 
 static void draw_clockrow(uint8_t* fb) {
@@ -662,10 +670,10 @@ static void draw_home_card(uint8_t* fb, EpdRect card, home_book_t* item, bool fo
     int block_h = (card.height - 4) / 2;
     /* 2026-10-17：色块左右与书本封面对齐不再超出，底边与封面底齐平。 */
     EpdRect block = {card.x + 2, card.y + card.height - 2 - block_h, card.width - 4, block_h};
-    /* 21f（2026-10-20 真机反馈）：色块不再用跟随封面底色的亚克力（黑封面时色块变深灰、
-     * 块上黑字不可读）——改固定浅灰底，任何封面（含纯黑真封面）下内容都清晰；
+    /* 21f2（2026-10-20 用户拍板）：恢复跟随封面底色的亚克力（21f 固定浅灰被否）；
+     * 黑封面不可读问题已由默认封面改纸色模板根治（真封面书保持原样，亚克力深浅跟随）。
      * 快刷稳定点阵转换（ui_acrylic_bw_rect 按最终像素转换）保留不变。 */
-    ui_fill_round_rect(fb, block, NX_R_SM, 0xe6);
+    ui_draw_acrylic_plain(fb, block);
     if (app_settings_main_fast_refresh()) ui_acrylic_bw_rect(fb, block);
     /* 书卡色块边框 2px 纯黑（对齐状态栏，2026-10-17）。 */
     ui_draw_control_frame(fb, block, NX_R_SM, NX8_INK);
@@ -779,6 +787,7 @@ static EpdRect s_wx_area;       /* 键盘局部刷新区 */
 static bool s_wx_layout, s_wx_settle;
 /* v9（第二十一批 e 段，2026-10-20）：时钟行右组五选一 widget。 */
 static bool s_wx_pick;                  /* 组件选项页 */
+static bool s_wx_img_pick;              /* 21f2：图片选择子页（TF 卡根目录 PNG 列表）*/
 static char s_wx_zone_text[72];        /* 自定义文字编辑缓冲 */
 
 /* v3 布局：月历置顶 96..716 → 老黄历上卡 728..852（历法：农历40+干支26）
@@ -1097,8 +1106,8 @@ static void render_wx_pick(uint8_t *fb) {
         {"天气", "图标 + 地点 + 高低温"},
         {"老黄历", "今日宜 / 忌"},
         {"木鱼", "点击敲一下，功德 +1"},
-        {"自定义图片", "TF 卡 /sdcard/homepic.png"},
-        {"自定义文字", "两行，最多 24 字"},
+        {"自定义图片", "TF 卡根目录 PNG，点选即用"},
+        {"自定义文字", "两行大字，最多 8 字"},
     };
     uint8_t cur = app_settings_clock_widget();
     for (int i = 0; i < 4; ++i) {
@@ -1115,7 +1124,7 @@ static void render_wx_pick(uint8_t *fb) {
     ui_text_vc(fb, wide.x + 24, wide.y + 38, 24, k_picks[4].name, EPD_DRAW_ALIGN_LEFT, false);
     ui_text_vc(fb, wide.x + 24, wide.y + 76, 15, k_picks[4].hint, EPD_DRAW_ALIGN_LEFT, false);
     if (cur == 4) ui_draw_selected_round_rect(fb, wide, NX_R_CARD);
-    ui_text_vc(fb, 342, 620, 17, "自定义图片：放一张 PNG 到 TF 卡 /sdcard/homepic.png（透明处透出底色）",
+    ui_text_vc(fb, 342, 620, 17, "自定义图片：选中后进入图片选择（TF 卡根目录 PNG，透明处透出底色）",
                EPD_DRAW_ALIGN_CENTER, false);
     ui_text_vc(fb, 342, 652, 17, "自定义文字：选中后进入编辑；右键返回",
                EPD_DRAW_ALIGN_CENTER, false);
@@ -1134,12 +1143,76 @@ static app_redraw_t wx_pick_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev
         if (!ui_rect_hit(wx_pick_rect(i), ev->x0, ev->y0)) continue;
         app_settings_set_clock_widget((uint8_t)i);
         s_wx_pick = false;
+        if (i == 3) {                      /* 21f2：图片选中后进入选择页（真机反馈缺「选择的步骤」）*/
+            s_wx_img_pick = true;
+            return APP_REDRAW_FULL;
+        }
         if (i == 4) {                     /* 文字：选中后直接进入编辑 */
             wx_edit_begin(ctx, 2);
             return APP_REDRAW_FULL;
         }
         return APP_REDRAW_FULL;           /* 回首页立即看到新组件 */
     }
+    return APP_REDRAW_NONE;
+}
+
+/* ---- 21f2：图片选择子页（用户真机反馈「自定义图片没有选择的步骤」）----
+ * 扫 TF 卡根目录 *.png（隐藏文件不列，最多前 10 个），点选保存文件名并回首页；
+ * 渲染与手势两处枚举同序同过滤，行号即文件序。 */
+#define WX_IMG_ROWS 10
+static EpdRect wx_img_row_rect(int i) { return (EpdRect){36, 186 + i * 76, 612, 66}; }
+
+static void render_wx_img_pick(uint8_t *fb) {
+    ui_clear_page(fb);
+    epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
+    ui_nav_status(fb);
+    ui_text_vc(fb, 342, 106, 34, "选择图片", EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 342, 150, 18, "TF 卡根目录的 PNG（最多列前 10 个）", EPD_DRAW_ALIGN_CENTER, false);
+    const char *cur = app_settings_clock_pic();
+    if (!cur[0]) cur = "homepic.png";
+    int n = 0;
+    DIR *d = opendir("/sdcard");
+    if (d) {
+        struct dirent *e;
+        while (n < WX_IMG_ROWS && (e = readdir(d)) != NULL) {
+            const char *dot = strrchr(e->d_name, '.');
+            if (e->d_name[0] == '.' || !dot || strcasecmp(dot, ".png") != 0) continue;
+            EpdRect row = wx_img_row_rect(n);
+            ui_fill_round_rect(fb, row, NX_R_CARD, NX8_PAPER);
+            ui_draw_control_frame(fb, row, NX_R_CARD, NX8_INK);
+            char fit[96];
+            wx_fit_text(fit, sizeof(fit), e->d_name, 21, 560);
+            ui_text_vc(fb, 60, row.y + 36, 21, fit, EPD_DRAW_ALIGN_LEFT, false);
+            if (!strcmp(cur, e->d_name)) ui_draw_selected_round_rect(fb, row, NX_R_CARD);
+            ++n;
+        }
+        closedir(d);
+    }
+    if (!n) ui_text_vc(fb, 342, 300, 20, "TF 卡根目录没有 PNG 文件", EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 342, 968, 17, "点选立即生效 · 右键返回", EPD_DRAW_ALIGN_CENTER, false);
+    ui_nav_draw(fb, 0);
+}
+
+static app_redraw_t wx_img_pick_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
+    (void)ctx;
+    if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
+    DIR *d = opendir("/sdcard");
+    if (!d) return APP_REDRAW_NONE;
+    int n = 0;
+    struct dirent *e;
+    while (n < WX_IMG_ROWS && (e = readdir(d)) != NULL) {
+        const char *dot = strrchr(e->d_name, '.');
+        if (e->d_name[0] == '.' || !dot || strcasecmp(dot, ".png") != 0) continue;
+        if (ui_rect_hit(wx_img_row_rect(n), ev->x0, ev->y0)) {
+            app_settings_set_clock_pic(e->d_name);
+            s_wx_img_ok = false;        /* 21f2：换图失效缓存，首页立即解码新图 */
+            s_wx_img_pick = false;
+            closedir(d);
+            return APP_REDRAW_FULL;    /* 回首页看效果 */
+        }
+        ++n;
+    }
+    closedir(d);
     return APP_REDRAW_NONE;
 }
 
@@ -1195,7 +1268,7 @@ static void render_wx_editor(uint8_t *fb) {
                                       : prov == WEATHER_PROVIDER_CAIYUN
                                       ? "彩云天气令牌（caiyunapp.com）"
                                       : "心知天气 API Key（seniverse.com 注册）")
-                  : "两行显示在首页时间旁，最多 24 字";
+                  : "首页两行大字显示，最多 8 字";
     ui_text(fb, 36, 160, 21, hint, EPD_DRAW_ALIGN_LEFT, false);
     ui_text_input_draw(fb, &s_wx_input, (EpdRect){36, 200, 612, 82}, 28, false, NULL);
     if (s_wx_notice[0]) ui_text_fixed_vc(fb, 36, 520, 22, s_wx_notice, EPD_DRAW_ALIGN_LEFT, false);
@@ -1315,6 +1388,10 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
     ui_nav_status(fb);
     if (s_wx_edit >= 0) {          /* 天气/组件文字编辑优先；键盘覆盖导航区，不画导航 */
         render_wx_editor(fb);
+        return;
+    }
+    if (s_wx_img_pick) {            /* 21f2：图片选择子页 */
+        render_wx_img_pick(fb);
         return;
     }
     if (s_wx_pick) {                /* v9：组件五选一选项页 */
@@ -1552,6 +1629,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
 
 static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
     if (s_wx_edit >= 0) return wx_editor_gesture(ctx, ev);
+    if (s_wx_img_pick) return wx_img_pick_gesture(ctx, ev);
     if (s_wx_pick) return wx_pick_gesture(ctx, ev);
     /* v7（用户 2026-10-20）：左右滑动换主页面，效果与点按底部导航一致；
      * 首页为最左页只左滑去书架；起点在导航热区（下沿上扩 16px）不触发。 */
@@ -1639,7 +1717,7 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
         uint8_t zone = app_settings_clock_widget();
         if (zone == 2) {
             app_settings_set_muyu_count(app_settings_muyu_count() + 1);
-            read_pico_buzzer_tone(1800, 80);
+            app_muyu_snd_play();          /* 21f2：与木鱼 app 共用音效设置（含关） */
             s_area = HOME_WX_AREA;
             return APP_REDRAW_AREA;
         }
@@ -1673,6 +1751,7 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
         if (key == UI_KEY_1) { ui_keyboard_end(); s_wx_edit = -1; return APP_REDRAW_PAGE; }
         return wx_save_field(ctx);
     }
+    if (s_wx_img_pick && key == UI_KEY_3) { s_wx_img_pick = false; s_wx_pick = true; return APP_REDRAW_PAGE; }
     if (s_wx_pick && key == UI_KEY_3) { s_wx_pick = false; return APP_REDRAW_PAGE; }
     if (s_wx_setup && key == UI_KEY_3) { s_wx_setup = false; return APP_REDRAW_PAGE; }
     /* 目标面板期间右键 = 关闭；首页本身是导航根页，按键停留。 */
@@ -1690,6 +1769,7 @@ static void home_on_exit(app_ctx_t* ctx) {
     if (s_wx_edit >= 0) { ui_keyboard_end(); s_wx_edit = -1; }
     s_wx_setup = false;
     s_wx_pick = false;
+    s_wx_img_pick = false;
     s_goal_open = false;
 }
 

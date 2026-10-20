@@ -83,11 +83,18 @@ esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk);
 /* ---- 木鱼功德计数（累计，长按可重置）---- */
 uint32_t app_settings_muyu_count(void);
 void app_settings_set_muyu_count(uint32_t count);
+/// 木鱼音效（21f2，NVS muyu_s）：0=关 1=笃 2=曲谱 3=复音 4=尖锐 5=低沉。
+/// 音效集对齐官方 demo 固件（app_muyu.h）；木鱼 app 与首页 widget 共用。
+uint8_t app_settings_muyu_snd(void);
+void app_settings_set_muyu_snd(uint8_t snd);
 /* ---- 首页时钟行右组 widget（用户 2026-10-20 第二十一批 e 段，五选一）----
- * 0=天气 1=老黄历宜忌 2=木鱼 3=自定义图片(/sdcard/homepic.png) 4=自定义文字。 */
+ * 0=天气 1=老黄历宜忌 2=木鱼 3=自定义图片 4=自定义文字。 */
 uint8_t app_settings_clock_widget(void);
 void app_settings_set_clock_widget(uint8_t type);
-/// 自定义文字（widget 4）内容，最长 24 汉字；空串=未设置。
+/// 自定义图片（widget 3）文件名，TF 卡根目录（21f2 补选择步骤）；空串=homepic.png。
+const char *app_settings_clock_pic(void);
+void app_settings_set_clock_pic(const char *name);
+/// 自定义文字（widget 4）内容，最长 8 汉字（21f2：两行大字，原 24 字改）；空串=未设置。
 const char *app_settings_clock_text(void);
 void app_settings_set_clock_text(const char *text);
 /// 空路径表示固件内建字体；非空为 SD 上的 TTF。/ Empty path is the built-in font; non-empty is a TTF on the SD card.
