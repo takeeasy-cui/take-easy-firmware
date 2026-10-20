@@ -1,0 +1,56 @@
+kiikoread — 许可适用范围 / License scope
+Policy date / 声明日期: 2026-10-15
+
+1. 新增原创内容 / New original material
+
+今后首次发布、权利人有权授权、并明确标注
+SPDX-License-Identifier: LicenseRef-Kiikoread-Personal-Study-1.0
+的新增原创内容，适用 licenses/kiikoread-Personal-Study-1.0.txt。
+允许个人学习、研究和测试；未经相应权利人事先书面许可，不得商用。
+官方未修改版本也允许在个人设备上用于非商业阅读。
+
+New original material first published after adoption of this policy is covered
+by licenses/kiikoread-Personal-Study-1.0.txt only when its rights holder can
+license it and explicitly marks it:
+SPDX-License-Identifier: LicenseRef-Kiikoread-Personal-Study-1.0
+It permits personal study, research and testing, and personal noncommercial
+reading with unmodified official builds. Commercial use requires prior written
+permission from the relevant rights holder.
+
+2. 现有代码与历史版本 / Existing code and historical versions
+
+本声明不改变已发布内容的许可，不撤销已经授予的权利。
+截至提交 a0573252388609f65e6aba0a7f78ab579fd1f4fd（v0.3.3-rc93）
+已发布的仓库内容，以及此后未被有效重新授权的既有内容，继续适用
+原有 Apache-2.0 或各自的组件许可。保留的 Apache-2.0 全文及原版权
+声明位于 licenses/Apache-2.0.txt。仅下载较新的副本不会使旧内容自动
+变成“禁止商用”，本声明也不重新许可 rc93 或更早版本的固件附件。
+
+This policy does not relicense previously published material or revoke rights
+already granted. Material published through commit
+a0573252388609f65e6aba0a7f78ab579fd1f4fd (v0.3.3-rc93), and existing material
+not subsequently validly relicensed, retains Apache-2.0 or its respective
+component license. The original Apache-2.0 text and copyright notice are
+preserved in licenses/Apache-2.0.txt. Obtaining a newer copy does not make
+previously licensed material noncommercial. Published rc93 and earlier binary
+assets are not relicensed by this policy.
+
+3. 第三方、贡献者及混合文件 / Third parties, contributors and mixed files
+
+第三方代码、字体、图标、波形和其他贡献者的内容继续适用其原有许可。
+不能仅凭本声明或替换文件头，改变不属于自己的权利或已经授予的许可。
+混合文件只有明确列出的新增原创部分才可能适用新许可；未明确标注的
+既有部分不受新限制。LGPL 组件的修改、调试和重新链接等权利予以保留。
+具体来源及许可见 THIRD_PARTY_NOTICES.md，贡献要求见 CONTRIBUTING.md。
+
+Third-party code, fonts, icons, waveforms and other contributors' material
+retain their existing licenses. This policy or a replacement header cannot
+relicense rights not owned by the licensor or revoke earlier grants. In a
+mixed file, only explicitly identified new original portions may receive the
+new license; existing portions are unaffected. LGPL rights, including rights
+to modify, debug and relink the library, remain intact. See
+THIRD_PARTY_NOTICES.md and CONTRIBUTING.md.
+
+这是分范围许可声明，不能将整个仓库或所有已发布固件统称为“禁止商用”。
+The licenses apply by scope; the whole repository and all historical firmware
+must not be described as exclusively noncommercial.

@@ -1,0 +1,52 @@
+# take-easy 文字游戏示例《山门夜话》（同一格式可做任意互动小说）
+* title 山门夜话
+
+> 深山里有一座荒废的古寺。你冒雨赶来，只为寻找一盏传说中的长明灯。
+* name 你
+> 推开寺门，雨声忽然远了。
+
+* name 看门老人
+> 客人深夜进山，所为何事？
+* choice 找传说中的长明灯|只是避雨
+* if c0 g lamp
+* if c1 g rain
+
+* label lamp
+> 你说出长明灯三个字，老人浑浊的眼睛亮了一下。
+* name 看门老人
+> 灯在，但灯不认生人。你要先答它一个问题——昨夜山里的钟，响过几声？
+* set asked
+* goto bridge
+
+* label rain
+> 你说只是避雨。老人点点头，把寺门虚掩上。
+* name 看门老人
+> 避雨的人多，看灯的人也多。灯只照第一个说实话的人。
+> 雨停之前，你可以再想一想是否真的只为避雨。
+* set honest
+* goto bridge
+
+* label bridge
+* if asked g court
+* ifnot asked g rain_wait
+
+* label rain_wait
+* name 你
+> 也许……我确实想看看那盏灯。
+* goto court
+
+* label court
+> 老人引你穿过回廊。正殿深处，一点灯焰静静燃烧，照着满壁尘埃。
+* name 看门老人
+> 三声。钟响过三声，山就记得三声。灯认得记性好的人。
+> 长明灯的火苗向东偏了偏，像在向你行礼。
+* if honest g ep_honest
+> 故事到这里告一段落。——你可以在 take-easy 上续写它。
+* end
+
+* label ep_honest
+> 因为你在最初说的是实话，长明灯为你多亮了一寸。
+* end
+
+
+AI生成
