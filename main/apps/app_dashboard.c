@@ -609,19 +609,23 @@ static char s_wx_notice[96];
 static EpdRect s_wx_area;       /* 键盘局部刷新区 */
 static bool s_wx_layout, s_wx_settle;
 
-/* v3 布局：月历置顶 96..716 → 老黄历 734..910（整宽）→ 目标行 930..1038。 */
+/* v3 布局：月历置顶 96..716 → 老黄历上卡 728..852（历法：农历40+干支26）
+ * → 老黄历下卡 858..990（宜/忌，徽章r17/条30）→ 目标行 1000..1084（H84）。
+ * v9（用户 2026-10-20）：一分为二重排、字体加大。 */
 #define GOAL_CAL_TOP 96
 #define GOAL_CAL_H   620
 #define GOAL_ROW_H   82
 #define GOAL_DOT_R   28
-/* v1.8 布局 v4（用户 2026-10-17 真机反馈）：卡加高、字体放大、目标行
- * 下沉收紧底部留白。v8（用户 2026-10-20）：备忘录移除，老黄历独占整宽。 */
-#define GOAL_ALM_Y   734
-#define GOAL_ALM_H   176
-#define GOAL_SET_Y   930
-#define GOAL_SET_H   108
+#define GOAL_ALM_TOP_Y 728
+#define GOAL_ALM_TOP_H 124
+#define GOAL_ALM_Y   858
+#define GOAL_ALM_H   132
+#define GOAL_SET_Y   1000
+#define GOAL_SET_H   84
+
 
 static EpdRect goal_month_arrow(int dir) { return (EpdRect){dir < 0 ? 36 : 584, 100, 64, 56}; }
+static EpdRect goal_almanac_top_rect(void) { return (EpdRect){36, GOAL_ALM_TOP_Y, 612, GOAL_ALM_TOP_H}; }
 static EpdRect goal_almanac_rect(void) { return (EpdRect){36, GOAL_ALM_Y, 612, GOAL_ALM_H}; }
 static EpdRect goal_minus_rect(void) { return (EpdRect){36, GOAL_SET_Y, 110, GOAL_SET_H}; }
 static EpdRect goal_plus_rect(void) { return (EpdRect){538, GOAL_SET_Y, 110, GOAL_SET_H}; }
@@ -825,9 +829,12 @@ static void render_goal_panel(uint8_t* fb) {
             epd_draw_circle(cx, cy, GOAL_DOT_R + 5, NX8_INK, fb);
         }
     }
-    /* ---- 老黄历 v8（用户 2026-10-20，备忘录移除后整宽重排）：
-     * 上行农历大字（36）+ 干支年小字居中，横线分隔；
-     * 下行宜/忌两块徽章分居左右半区，条目字号 18→24。 ---- */
+    /* ---- 老黄历 v9（用户 2026-10-20，一分为二+字体加大）：
+     * 上卡=历法（农历 40px 大字 + 干支年 26px 居中，无分隔线，卡内上下双行）；
+     * 下卡=宜/忌（左右两块，徽章 28px，条目 30px）。 ---- */
+    EpdRect alm_top = goal_almanac_top_rect();
+    ui_fill_round_rect(fb, alm_top, NX_R_CARD, NX8_PAPER);
+    ui_draw_control_frame(fb, alm_top, NX_R_CARD, NX8_INK);
     EpdRect alm = goal_almanac_rect();
     ui_fill_round_rect(fb, alm, NX_R_CARD, NX8_PAPER);
     ui_draw_control_frame(fb, alm, NX_R_CARD, NX8_INK);
@@ -837,19 +844,34 @@ static void render_goal_panel(uint8_t* fb) {
         char gz[32], lunar[48], yi[64], ji[64];
         goal_almanac_chars_two(gz, lunar, yi, ji, sy, sm, sd);
         if (!lunar[0]) {
-            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + alm.height / 2, 28, "老黄历", EPD_DRAW_ALIGN_CENTER, false);
+            ui_text_vc(fb, alm_top.x + alm_top.width / 2, alm_top.y + 44, 28, "老黄历", EPD_DRAW_ALIGN_CENTER, false);
         } else {
-            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 44, 36, lunar, EPD_DRAW_ALIGN_CENTER, false);
-            ui_text_vc(fb, alm.x + alm.width / 2, alm.y + 88, 22, gz, EPD_DRAW_ALIGN_CENTER, false);
-            ui_fill_rect_fast((EpdRect){alm.x + 24, alm.y + 116, alm.width - 48, 2}, NX8_INK, fb);
-            /* 宜：实心黑圆白字；忌：空心圆（2px 黑边）黑字。 */
-            epd_fill_circle(alm.x + 58, alm.y + 150, 17, NX8_INK, fb);
-            ui_text_vc(fb, alm.x + 58, alm.y + 150, 20, "宜", EPD_DRAW_ALIGN_CENTER, true);
-            epd_draw_circle(alm.x + 320, alm.y + 150, 17, NX8_INK, fb);
-            epd_draw_circle(alm.x + 320, alm.y + 150, 16, NX8_INK, fb);
-            ui_text_vc(fb, alm.x + 320, alm.y + 150, 20, "忌", EPD_DRAW_ALIGN_CENTER, false);
-            ui_text_vc(fb, alm.x + 90, alm.y + 152, 24, yi, EPD_DRAW_ALIGN_LEFT, false);
-            ui_text_vc(fb, alm.x + 352, alm.y + 152, 24, ji, EPD_DRAW_ALIGN_LEFT, false);
+            /* 上卡（H124）：农历大字 40 于 +46，干支 26 于 +92，上下留白均衡。 */
+            ui_text_vc(fb, alm_top.x + alm_top.width / 2, alm_top.y + 46, 40, lunar, EPD_DRAW_ALIGN_CENTER, false);
+            ui_text_vc(fb, alm_top.x + alm_top.width / 2, alm_top.y + 92, 26, gz, EPD_DRAW_ALIGN_CENTER, false);
+            /* 下卡：宜/忌左右两块，条目 30px；徽章圆 r18/字 24。 */
+            int cy2 = alm.y + alm.height / 2;
+            epd_fill_circle(alm.x + 56, cy2, 18, NX8_INK, fb);
+            ui_text_vc(fb, alm.x + 56, cy2, 24, "宜", EPD_DRAW_ALIGN_CENTER, true);
+            char yi_text[74] = {0};
+            snprintf(yi_text, sizeof(yi_text), "%.70s", yi);
+            while (yi_text[0] && ttf_text_width_px(ui_text_effective_px(30), yi_text) > 226) {
+                size_t n = strlen(yi_text) - 1;
+                while (n && ((unsigned char)yi_text[n] & 0xc0) == 0x80) --n;
+                yi_text[n] = 0;
+            }
+            ui_text_vc(fb, alm.x + 88, cy2, 30, yi_text, EPD_DRAW_ALIGN_LEFT, false);
+            epd_draw_circle(alm.x + 320, cy2, 18, NX8_INK, fb);
+            epd_draw_circle(alm.x + 320, cy2, 17, NX8_INK, fb);
+            ui_text_vc(fb, alm.x + 320, cy2, 24, "忌", EPD_DRAW_ALIGN_CENTER, false);
+            char ji_text[74] = {0};
+            snprintf(ji_text, sizeof(ji_text), "%.70s", ji);
+            while (ji_text[0] && ttf_text_width_px(ui_text_effective_px(30), ji_text) > 226) {
+                    size_t n = strlen(ji_text) - 1;
+                    while (n && ((unsigned char)ji_text[n] & 0xc0) == 0x80) --n;
+                    ji_text[n] = 0;
+                }
+            ui_text_vc(fb, alm.x + 352, cy2, 30, ji_text, EPD_DRAW_ALIGN_LEFT, false);
         }
     }
     /* ---- 目标设置行：− [数值 分钟] + （数字点阵 pitch9 缩小 1/3） ---- */
@@ -866,8 +888,7 @@ static void render_goal_panel(uint8_t* fb) {
         ui_text_vc(fb, nx + w + 14, goal_value_rect().y + GOAL_SET_H / 2, 26, "分钟", EPD_DRAW_ALIGN_LEFT, false);
     }
     ui_draw_button(fb, goal_plus_rect(), "+", false);
-    ui_text_vc(fb, 342, 1072, 18, "点击日期看黄历 · 每次调整 15 分钟 · 右键退出",
-               EPD_DRAW_ALIGN_CENTER, false);
+    /* v9：下方留白已被目标行与两卡占满，提示行撤除。 */
     /* v6（2026-10-19 用户真机反馈）：阅读数据面板恢复底部导航栏（与其它页面一致），
      * 导航命中同步放开；编辑态由键盘覆盖导航区仍不画。 */
     ui_nav_draw(fb, 0);

@@ -273,22 +273,23 @@ void app_lock_clock_art(uint8_t *fb) {
         char gz[32], lunar[48], yi[64], ji[64];
         lock_almanac_fields(tm_bj.tm_year + 1900, tm_bj.tm_mon + 1, tm_bj.tm_mday,
                             gz, sizeof(gz), lunar, sizeof(lunar), yi, sizeof(yi), ji, sizeof(ji));
-        int w_yi = ttf_text_width_px(26, yi);
-        int gx = 300 - (32 + 8 + w_yi) / 2;
-        epd_fill_circle(683 - 532, gx + 16, 16, 0x00, fb);
-        lock_land_text(fb, gx + 16, 532, 20, "宜", 0xFF);
-        lock_land_text(fb, gx + 40 + w_yi / 2, 534, 26, yi, 0x00);
-        int w_ji = ttf_text_width_px(26, ji);
-        int hx = 908 - (32 + 8 + w_ji) / 2;
-        epd_draw_circle(683 - 532, hx + 16, 16, 0x00, fb);
-        epd_draw_circle(683 - 532, hx + 16, 15, 0x00, fb);
-        lock_land_text(fb, hx + 16, 532, 20, "忌", 0x00);
-        lock_land_text(fb, hx + 40 + w_ji / 2, 534, 26, ji, 0x00);
-        /* 底部：历法头（原提示位置）。v6（用户 2026-10-19 真机反馈）：字号与
-         * 顶部日期一致 36（原 24 次级层级取消）。 */
+        /* v6（用户 2026-10-20）：老黄历字体加大——条 26→34、徽章 r16→r19/字 20→23、
+         * 历法头 36→40。两块仍以 300/908 为中心，块宽=徽章38+间距10+条目宽。 */
+        int w_yi = ttf_text_width_px(34, yi);
+        int gx = 300 - (38 + 10 + w_yi) / 2;
+        epd_fill_circle(683 - 532, gx + 19, 19, 0x00, fb);
+        lock_land_text(fb, gx + 19, 532, 23, "宜", 0xFF);
+        lock_land_text(fb, gx + 48 + w_yi / 2, 534, 34, yi, 0x00);
+        int w_ji = ttf_text_width_px(34, ji);
+        int hx = 908 - (38 + 10 + w_ji) / 2;
+        epd_draw_circle(683 - 532, hx + 19, 19, 0x00, fb);
+        epd_draw_circle(683 - 532, hx + 19, 18, 0x00, fb);
+        lock_land_text(fb, hx + 19, 532, 23, "忌", 0x00);
+        lock_land_text(fb, hx + 48 + w_ji / 2, 534, 34, ji, 0x00);
+        /* 底部：历法头（原提示位置）。字号 40（用户 2026-10-20 加大）。 */
         char head[112];
         snprintf(head, sizeof(head), "%s · %s", gz, lunar);
-        lock_land_text(fb, 608, 652, 36, head, 0x00);
+        lock_land_text(fb, 608, 652, 40, head, 0x00);
     }
 }
 
