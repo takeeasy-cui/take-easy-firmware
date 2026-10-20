@@ -3292,10 +3292,14 @@ static bool present(app_ctx_t* ctx, app_redraw_t redraw) {
         : update_display_with(ctx->hl, &E0470_FULL_WAVEFORM, MODE_GC16);
     else if (redraw == APP_REDRAW_FULL || s_reader_cleanup) err = update_display_full(ctx->hl);
     else if (redraw == APP_REDRAW_AREA && s_view == SHELF && s_shelf_feedback_pending) {
-        // 抽出与复位只驱动发生变化的像素，避免整张封面被反复压黑。
-        // Lift and restore only changed pixels, avoiding a dark pulse over the whole cover.
-        err = update_display_area_diff_with(ctx->hl,
-            s_mode == MODE_DU ? &E0470_FOLLOW_WAVEFORM : &E0470_WAVEFORM, s_mode, s_area);
+        /* 22b（真机反馈封面残影）：封面批次揭示改整域 full GL16——diff 只驱动变化像素，
+         * 残影自留存的像素永远得不到再驱动（fb 值与屏上物理残影一致时 diff 判定无变化）；
+         * full 全像素重驱动一次清干净。按压反馈（抬起小差异）保持 diff 不做整域压黑。 */
+        if (s_cover_batch_present_pending)
+            err = update_display_area_full_with(ctx->hl, &E0470_WAVEFORM, MODE_GL16, s_area);
+        else
+            err = update_display_area_diff_with(ctx->hl,
+                s_mode == MODE_DU ? &E0470_FOLLOW_WAVEFORM : &E0470_WAVEFORM, s_mode, s_area);
     }
     else if (redraw == APP_REDRAW_AREA) {
         // 快档每次显式设置并在推屏后恢复，不能把阅读节拍带入主页水波纹。

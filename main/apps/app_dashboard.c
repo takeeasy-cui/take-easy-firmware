@@ -113,6 +113,7 @@ static char s_cached_last_path[BOOK_STORE_PATH_MAX];
 static uint32_t s_cached_progress_revision = UINT32_MAX;
 static EpdRect s_area;
 static bool s_area_bw;   /* 21k：AREA 内容纯黑白且回调已自绘（木鱼 widget 敲击）→ DU 快刷直推 */
+static bool s_area_cover_full;  /* 22b：封面就绪条带→整域 full GL16（diff 不驱动残影自留存像素） */
 static bool s_home_force_full_once;
 /* 阅读数据：近 30 天每日秒数（最早到今天）。 */
 static uint32_t s_reading_days[30];
@@ -1479,6 +1480,15 @@ static bool present(app_ctx_t *ctx, app_redraw_t redraw) {
             &E0470_FOLLOW_WAVEFORM, MODE_DU, s_area));
         return true;
     }
+    /* 22b（真机反馈封面残影）：封面就绪条带改整域 full GL16。diff 只驱动变化像素，
+     * 封面更替后旧残影像素得不到再驱动（fb 新值写入后 diff 无变化可刷）；
+     * full 全像素重驱动一次清干净，灰阶封面也用 GL16 正确呈现。 */
+    if (redraw == APP_REDRAW_AREA && s_area_cover_full) {
+        s_area_cover_full = false;
+        guard_draw_result(ctx->hl, update_display_area_full_with(ctx->hl,
+            &E0470_WAVEFORM, MODE_GL16, s_area));
+        return true;
+    }
     render(ctx, ctx->fb);
     enum EpdDrawError result;
     if (redraw == APP_REDRAW_AREA)
@@ -1565,6 +1575,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
             s_avatar_wait = false;
             render(ctx, ctx->fb);
             s_area = (EpdRect){0, 24, 684, 52};
+            s_area_cover_full = false;
             return APP_REDRAW_AREA;
         }
     } else s_avatar_wait = true;
@@ -1601,6 +1612,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
             render(ctx, ctx->fb);
             s_area = (EpdRect){NX_MARGIN - 3, s_layout.cards[0].y,
                                588 + 6, HOME_CARD_H + 6};
+            s_area_cover_full = true;    /* 22b：封面条带走 full GL16 清残影 */
             return APP_REDRAW_AREA;
         }
         if (!waiting) s_cover_next = 2;
@@ -1620,6 +1632,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
                     s_last_min = tm_bj.tm_min;
                     render(ctx, ctx->fb);
                     s_area = HOME_CLOCK_TICK_AREA;
+                    s_area_cover_full = false;
                 return APP_REDRAW_AREA;
             }
         }
@@ -1632,6 +1645,7 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
         if (weather_service_tick(network.network_ready)) {
             render(ctx, ctx->fb);
             s_area = HOME_WX_AREA;
+            s_area_cover_full = false;
             return APP_REDRAW_AREA;
         }
     }
@@ -1735,6 +1749,7 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
             epd_fill_rect(HOME_WX_AREA, NX8_PAPER, ctx->fb);
             draw_wx_muyu(ctx->fb);
             s_area_bw = true;            /* 21k：纯黑白自绘区，present 走 DU 快刷并跳过整页 render */
+            s_area_cover_full = false;
             s_area = HOME_WX_AREA;
             return APP_REDRAW_AREA;
         }
