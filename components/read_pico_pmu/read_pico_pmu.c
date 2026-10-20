@@ -26,6 +26,9 @@ static uint16_t s_seq = 1;
 static bool s_ready;
 static uint8_t s_last_payload[PMU_FRAME_PAYLOAD_SIZE];
 static uint8_t s_last_plen;
+/* 阑钟到点锁存（第二十一批 c 段）：事件 FIFO 里的 ALARM_FIRED 在任何抽阅路径
+ * （take_key/drain）都被 ack，锁存防止丢失；read_pico_pmu_take_alarm() 取走。 */
+static bool s_alarm_fired;
 
 /* ---- 帧收发 / Frame I/O ---- */
 uint16_t pmu_crc16_ccitt_false(const uint8_t* data, uint16_t length) {
@@ -386,6 +389,8 @@ void read_pico_pmu_drain_events(void) {
         if (!s_snap.event_ok || s_snap.pending_events == 0) break;
         uint16_t id = s_snap.event.event_id;
         if (id == 0) break;
+        /* 闹钟事件不随队列丢弃（第二十一批 c 段）：开机 drain 也会记下，由开机流程响铃。 */
+        if (s_snap.event.type == PMU_EVT_ALARM_FIRED) s_alarm_fired = true;
         ESP_LOGI(TAG, "drain %s id=%u", pmu_event_name(s_snap.event.type), (unsigned)id);
         if (read_pico_pmu_event_ack(id) != ESP_OK) break;
     }
@@ -404,6 +409,10 @@ read_pico_pmu_key_action_t read_pico_pmu_take_key_action(void) {
         } else if (type == PMU_EVT_KEY_LONG) {
             action = READ_PICO_PMU_KEY_LONG;
             ESP_LOGI(TAG, "KEY_LONG id=%u held=%u", (unsigned)id, (unsigned)s_snap.event.arg0);
+        } else if (type == PMU_EVT_ALARM_FIRED) {
+            /* 闹钟事件随按键抽阅时锁存（第二十一批 c 段）：否则会被 ack 掉而丢失。 */
+            s_alarm_fired = true;
+            ESP_LOGI(TAG, "ALARM_FIRED id=%u mode=%u", (unsigned)id, (unsigned)s_snap.event.arg0);
         }
         if (id == 0) break;
         if (read_pico_pmu_event_ack(id) != ESP_OK) break;
@@ -426,10 +435,33 @@ bool read_pico_pmu_take_key_wakeup(void) {
             wake = true;
             ESP_LOGI(TAG, "key wake %s id=%u", pmu_event_name(type), (unsigned)id);
         }
+        if (type == PMU_EVT_ALARM_FIRED) s_alarm_fired = true;
         if (id == 0) break;
         if (read_pico_pmu_event_ack(id) != ESP_OK) break;
     }
     return wake;
+}
+
+/* ---- 硬件闹钟（第二十一批 c 段，协议 PMU_CMD_ALARM_SET/GET）----
+ * mode：0=关 1=单次；seconds 为距现在的相对秒（10s..31 天），LE。
+ * 到点 PMU 推 ALARM_FIRED；主机关机则自动开机（wake_reason=6）。 */
+esp_err_t read_pico_pmu_alarm_set(uint8_t mode, uint32_t seconds) {
+    if (!s_ready) return ESP_ERR_NOT_FOUND;
+    uint8_t buf[5] = { mode };
+    buf[1] = (uint8_t)(seconds & 0xFF);
+    buf[2] = (uint8_t)((seconds >> 8) & 0xFF);
+    buf[3] = (uint8_t)((seconds >> 16) & 0xFF);
+    buf[4] = (uint8_t)((seconds >> 24) & 0xFF);
+    esp_err_t err = read_pico_pmu_cmd(PMU_CMD_ALARM_SET, buf, sizeof(buf));
+    if (err == ESP_OK) (void)read_pico_pmu_cmd(PMU_CMD_ALARM_GET, NULL, 0);
+    return err;
+}
+
+/// 取走并清除「闹钟已到点」锁存（drain/take_key 路径锁存，防事件被 ack 后丢失）。
+bool read_pico_pmu_take_alarm(void) {
+    bool fired = s_alarm_fired;
+    s_alarm_fired = false;
+    return fired;
 }
 
 // 命令 OK/ACCEPTED 只表示受理，以 STATUS power_state 为准。

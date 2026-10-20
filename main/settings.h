@@ -67,6 +67,20 @@ void app_settings_set_todo(int index, const char *text);
 /// 时钟锁屏的农历/老黄历显示开关。/ Toggle for the almanac rows under the clock lock.
 bool app_settings_clock_almanac(void);
 void app_settings_set_clock_almanac(bool on);
+/* ---- 闹钟（PMU 硬件闹钟，用户 2026-10-20 第二十一批 c 段）----
+ * 闹钟独立于锁屏模式：PMU RTC 到点推 ALARM_FIRED，主机关机则自动开机
+ * （wake_reason=6）。每日循环由主机响铃时重排实现（PMU 只设单次）。 */
+bool app_settings_alarm_enabled(void);
+uint8_t app_settings_alarm_hour(void);
+uint8_t app_settings_alarm_minute(void);
+esp_err_t app_settings_set_alarm(bool enabled, uint8_t hour, uint8_t minute);
+/* ---- 番茄时钟（默认 25/5，设置可调 15..60 / 5..60）---- */
+uint8_t app_settings_pomo_work(void);
+uint8_t app_settings_pomo_break(void);
+esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk);
+/* ---- 木鱼功德计数（累计，长按可重置）---- */
+uint32_t app_settings_muyu_count(void);
+void app_settings_set_muyu_count(uint32_t count);
 /// 空路径表示固件内建字体；非空为 SD 上的 TTF。/ Empty path is the built-in font; non-empty is a TTF on the SD card.
 const char* app_settings_font_path(void);
 void app_settings_set_font_path(const char* path);

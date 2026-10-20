@@ -59,6 +59,7 @@
 #include "read_pico_buzzer.h"
 #include "ble_page_turner.h"
 #include "read_pico_pmu.h"
+#include "alarm.h"
 #include "read_pico_transfer.h"
 #include "sc7a20h_lab.h"
 #include "settings.h"
@@ -259,6 +260,16 @@ void app_lock_clock_art(uint8_t *fb) {
     char bat[10];
     snprintf(bat, sizeof(bat), "%d%%", pct >= 0 ? pct : 0);
     lock_land_text(fb, 1096, 70, 26, bat, 0x00);
+    /* 闹铃图标（用户 2026-10-20 第二十一批 c 段）：闹钟武装时右上（电量左侧）显示。
+     * 横屏逻辑坐标，圆走 (683-y, x) 映射；铃身双圈 + 铃锤 + 两腿点。 */
+    if (app_settings_alarm_enabled()) {
+        const int ax = 1000, ay = 70;
+        epd_draw_circle(683 - ay, ax, 15, 0x00, fb);
+        epd_draw_circle(683 - ay, ax, 14, 0x00, fb);
+        epd_fill_circle(683 - ay, ax, 5, 0x00, fb);
+        epd_fill_circle(683 - (ay - 18), ax - 10, 3, 0x00, fb);
+        epd_fill_circle(683 - (ay - 18), ax + 10, 3, 0x00, fb);
+    }
     /* 中央特大点阵时钟：pitch 38 / r18，"10:17" 5 字符宽约 1102 居中，高约 266 */
     char cs[8] = "--:--";
     if (ok) snprintf(cs, sizeof(cs), "%02d:%02d", tm_bj.tm_hour, tm_bj.tm_min);
@@ -543,8 +554,18 @@ app_wake_source_t app_light_sleep_wait_timed(sc7a20h_handle_t acc, uint32_t time
     if (!(book_cover_jobs_quiesce(2000) && ui_avatar_quiesce(2000))) return APP_WAKE_KEY;
     bool pickup = acc != NULL && app_settings_pickup_wake();
     bool acc_armed = false;
-    const int64_t deadline_us = timeout_ms
+    int64_t deadline_us = timeout_ms
         ? esp_timer_get_time() + (int64_t)timeout_ms * 1000 : 0;
+    /* 闹钟对齐（第二十一批 c 段，2026-10-20）：闹钟武装时 deadline 提前到闹钟时刻
+     * （无 deadline 时也创建）——任何锁屏浅睡必在闹钟到点定时醒来，锁屏循环
+     * 消费 ALARM_FIRED 锁存响铃；未武装（0）不影响原有超时语义。 */
+    {
+        uint32_t alarm_sec = alarm_next_sleep_sec();
+        if (alarm_sec) {
+            int64_t alarm_us = esp_timer_get_time() + (int64_t)alarm_sec * 1000000;
+            if (!deadline_us || alarm_us < deadline_us) deadline_us = alarm_us;
+        }
+    }
     periph_suspend(false);
     lock_arm_ioe_wakeup();
     if (pickup) {
@@ -827,6 +848,12 @@ void enter_lock_and_sleep(
             app_wake_source_t wake = app_light_sleep_wait_timed(acc, lock_clock_next_tick_ms());
             if (wake != APP_WAKE_TIMEOUT) break;
             if (lock_pin_enabled()) { break; }   /* 密码启用时保持静态画面，验证交还主循环 */
+            /* 闹钟到点（浅睡 deadline 已对齐）：响铃页接管，然后整页重画时钟锁屏。 */
+            if (alarm_consume_ring(hl, framebuffer, touch)) {
+                app_lock_clock_art(framebuffer);
+                guard_draw_result(hl, update_display_full(hl));
+                continue;
+            }
             struct tm tm_chk = {0};
             bool day_flip = false;
             if (lock_now_bj(&tm_chk)) {
@@ -846,15 +873,17 @@ void enter_lock_and_sleep(
             guard_draw_result(hl, update_display_area_diff_with(hl, &E0470_WAVEFORM, MODE_DU, area));
         }
     } else if (lock_style == 3) {
-        /* 计算器锁屏：浅睡等电源键/拿起唤醒；唤醒后计算器可用（正常计算照常），
-         * 恰四位数字按＝验证 lock_pin 解锁；空闲或再按电源键回浅睡，超时深睡。 */
+        /* 计算器锁屏改造（用户 2026-10-20 拍板）：只浅睡可随时唤醒，不再超时深睡
+         * （与时钟模式同构「永不交 PMU 深睡」）；不唤醒不刷新（无周期重绘）。
+         * 浅睡 deadline 已对齐闹钟时刻：闹钟到点醒来响铃，重画计算器后继续。 */
         (void)ble_pt_stop(2000);
         for (;;) {
-            app_wake_source_t wake = app_light_sleep_wait_timed(acc, APP_LOCK_LIGHT_SLEEP_MS);
-            if (wake == APP_WAKE_TIMEOUT) {
-                app_enter_host_sleep(APP_SLEEP_DEEP);
-                /* 深睡交接意外返回时保持锁定，稍候重试而不是忙转。 */
-                vTaskDelay(pdMS_TO_TICKS(1000));
+            app_wake_source_t wake = app_light_sleep_wait(acc);
+            (void)wake;
+            if (alarm_consume_ring(hl, framebuffer, touch)) {
+                calc_core_reset();
+                calc_core_paint_page(framebuffer);
+                guard_draw_result(hl, update_display_full(hl));
                 continue;
             }
             if (lock_calc_session(hl, touch)) break;
@@ -864,10 +893,30 @@ void enter_lock_and_sleep(
             guard_draw_result(hl, update_display_full(hl));
         }
     } else {
-        app_wake_source_t wake = APP_WAKE_KEY;
-        if (lock_pin_enabled()) lock_screen_authenticate(hl, touch, acc, false);
-        else wake = app_light_sleep_wait_timed(acc, APP_LOCK_LIGHT_SLEEP_MS);
-        if (wake == APP_WAKE_TIMEOUT) app_enter_host_sleep(APP_SLEEP_DEEP);
+        /* 壁纸/书封：浅睡等唤醒，超时深睡；闹钟武装时浅睡 deadline 对齐闹钟时刻，
+         * 响铃后重画锁屏画面再继续（不因响铃错过而直接深睡）。 */
+        bool repaint = false;
+        for (;;) {
+            if (repaint) {
+                if (lock_style == 1) {
+                    epd_hl_set_all_white(hl);
+                    if (!draw_wallpaper(framebuffer))
+                        ui_draw_full_image_z(framebuffer, loading_4bpp_bin_z_start, loading_4bpp_bin_z_end);
+                } else {
+                    lock_cover_overlay(framebuffer);
+                }
+                guard_draw_result(hl, update_display_full(hl));
+                repaint = false;
+                continue;
+            }
+            app_wake_source_t wake = APP_WAKE_KEY;
+            if (lock_pin_enabled()) { lock_screen_authenticate(hl, touch, acc, false); break; }
+            wake = app_light_sleep_wait_timed(acc, APP_LOCK_LIGHT_SLEEP_MS);
+            if (wake != APP_WAKE_TIMEOUT) break;      /* 按键/拿起：解锁回主循环 */
+            if (alarm_consume_ring(hl, framebuffer, touch)) { repaint = true; continue; }
+            app_enter_host_sleep(APP_SLEEP_DEEP);     /* 真超时：交 PMU 深睡 */
+            vTaskDelay(pdMS_TO_TICKS(1000));          /* 深睡交接意外返回：稍候重试 */
+        }
     }
     pico_boot_clear_resume();
     if (lock_pin_enabled()) app_font_end_lock(&lock_font);
@@ -896,28 +945,8 @@ void app_lock_boot_gate(EpdiyHighlevelState *hl, cst836u_handle_t touch, sc7a20h
         vTaskDelay(pdMS_TO_TICKS(20));
     app_lock_font_t saved; app_font_begin_lock(&saved);
     uint8_t *fb = epd_hl_get_framebuffer(hl);
-    /* v2（用户 2026-10-19 定稿）：计算器锁屏的开机门控=计算器画面本身——
-     * 与锁屏态同构（白底计算器、正常计算照常、恰四位数字按＝解锁）。
-     * 全点阵零字体依赖，font_begin/end 仅对其他样式生效。 */
-    if (app_settings_lock_style() == 3) {
-        calc_core_set_unlock_mode(true);
-        calc_core_reset();
-        calc_core_paint_page(fb);
-        guard_draw_result(hl, update_display_full(hl));
-        /* 与 lock_screen_authenticate 的 boot 分支同构：开机门控等待不是启动失败，
-         * 保留一次性恢复不提前开书——验证成功返回后由 app_main 取走恢复上次阅读。 */
-        pico_boot_ready();
-        pico_boot_hold_resume();
-        for (;;) {
-            if (lock_calc_session(hl, touch)) break;
-            /* 开机门控无超时概念：会话退出（电源键/空闲）即重画初始计算器再验证。 */
-            calc_core_reset();
-            calc_core_paint_page(fb);
-            guard_draw_result(hl, update_display_full(hl));
-        }
-        read_pico_pmu_drain_events();
-        return;
-    }
+    /* 开机门控 calc 分支删除（用户 2026-10-20 拍板）：计算器锁屏开机不再独占门控，
+     * 与其他样式统一走「恢复锁屏图 → 密码验证页」；计算器密码语义不变（仅应用计算器锁屏）。 */
     if (!lock_screen_restore(fb)) {
         if (!app_lock_boot_art(fb)) {
             memset(fb, 255, (size_t)epd_width() * epd_height() / 2);

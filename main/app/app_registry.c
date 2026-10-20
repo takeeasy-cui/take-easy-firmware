@@ -21,6 +21,8 @@ extern const app_desc_t app_avgr;
 extern const app_desc_t app_gtext;
 extern const app_desc_t app_gbbk;
 extern const app_desc_t app_notes;
+extern const app_desc_t app_pomodoro;
+extern const app_desc_t app_muyu;
 
 // 正式产品页面清单；工厂测试与历史示例不进入用户导航。
 // GameCore（2026-10-18）：游戏入口 = 推理/文字/步步高三薄壳，互斥插件内核驱动。
@@ -36,6 +38,8 @@ static const app_desc_t* const s_apps[] = {
     &app_gtext,
     &app_gbbk,
     &app_notes,
+    &app_pomodoro,
+    &app_muyu,
 };
 
 #define APP_COUNT ((int)(sizeof(s_apps) / sizeof(s_apps[0])))

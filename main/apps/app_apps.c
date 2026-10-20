@@ -1,12 +1,15 @@
 /*
  * 应用页（APPS）：固定 4 列 × 5 行图标架构（最多 20 格）。
  * RickyOS 风格圆角方 tile（112px / 圆角 28 / 3px 描边）+ 56px 线性图标 +
- * tile 下 12px 居中标签；已有应用：文件管理/传输文件/计算器占首行前三格，
- * 其余格子留空白（不加占位框），后续应用按序填入。
+ * tile 下 12px 居中标签。排序规则（用户 2026-10-20 拍板）：
+ * 所有新增应用排在推理游戏前，三个游戏图标保持在最后——
+ * 首行：文件管理/传输文件/计算器/便签；第二行：番茄时钟/木鱼/推理/文字；步步高殿后。
+ * 其余格子留空白（不加占位框），后续新应用按序插入游戏之前。
  * 微信读书 tile 已删（微信传书入口在传输文件页）。
  *
  * Fixed 4x5 icon grid (up to 20 cells), RickyOS-style 112 px tiles with 56 px
- * line icons and centered labels. Only real apps draw; empty cells stay blank.
+ * line icons and centered labels. New apps precede the three games (user rule);
+ * only real apps draw; empty cells stay blank.
  */
 #include <math.h>
 #include <stdio.h>
@@ -40,10 +43,14 @@ extern const app_desc_t app_avgr;
 extern const app_desc_t app_gtext;
 extern const app_desc_t app_gbbk;
 extern const app_desc_t app_notes;
+extern const app_desc_t app_pomodoro;
+extern const app_desc_t app_muyu;
 static const app_desc_t* page_avgr(void)   { return &app_avgr; }
 static const app_desc_t* page_gtext(void) { return &app_gtext; }
 static const app_desc_t* page_gbbk(void)  { return &app_gbbk; }
 static const app_desc_t* page_notes(void) { return &app_notes; }
+static const app_desc_t* page_pomodoro(void) { return &app_pomodoro; }
+static const app_desc_t* page_muyu(void) { return &app_muyu; }
 static const app_desc_t* page_transfer(void) {
     extern const app_desc_t app_transfer;
     return &app_transfer;
@@ -129,11 +136,35 @@ static void icon_notes(uint8_t* fb, int cx, int cy, uint8_t ink) {
     nothing_thick_line(fb, cx - 11, cy + 7, cx - 2, cy + 7, 4, ink);
 }
 
-static const apps_entry_t k_entries[7] = {
+static void icon_pomodoro(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 番茄钟：圆表盘 + 两根指针 + 顶部小叶柄。 */
+    epd_draw_circle(cx, cy + 4, 21, ink, fb);
+    epd_draw_circle(cx, cy + 4, 20, ink, fb);
+    nothing_thick_line(fb, cx, cy + 4, cx + 11, cy - 10, 4, ink);
+    nothing_thick_line(fb, cx, cy + 4, cx - 8, cy - 1, 5, ink);
+    nothing_thick_line(fb, cx - 3, cy - 18, cx + 3, cy - 21, 4, ink);
+    epd_fill_circle(cx, cy - 23, 4, ink, fb);
+}
+
+static void icon_muyu(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 木鱼：圆身 + 右前开口 + 圆点眼 + 斜置槌。 */
+    const int bx = cx - 4;
+    epd_draw_circle(bx, cy, 19, ink, fb);
+    epd_draw_circle(bx, cy, 18, ink, fb);
+    ui_fill_rect_fast((EpdRect){bx + 11, cy - 12, 12, 24}, 0xf0, fb);
+    nothing_thick_line(fb, bx + 11, cy - 12, bx + 11, cy + 12, 3, ink);
+    epd_fill_circle(bx - 5, cy - 11, 3, ink, fb);
+    nothing_thick_line(fb, bx + 15, cy + 16, cx + 18, cy + 20, 5, ink);
+    epd_fill_circle(cx + 20, cy + 21, 6, ink, fb);
+}
+
+static const apps_entry_t k_entries[9] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
     {"计算器", icon_calc, page_calc, true},
     {"便签", icon_notes, page_notes, true},
+    {"番茄时钟", icon_pomodoro, page_pomodoro, true},
+    {"木鱼", icon_muyu, page_muyu, true},
     {"推理游戏", icon_avgr, page_avgr, true},
     {"文字游戏", icon_gtext, page_gtext, true},
     {"步步高游戏", icon_gbbk, page_gbbk, true},

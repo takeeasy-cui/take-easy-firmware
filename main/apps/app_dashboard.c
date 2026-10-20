@@ -69,6 +69,8 @@
  * 天气完成只刷右组条带（图标+地点+高低温）。 */
 #define HOME_CLOCK_TICK_AREA ((EpdRect){48, 131, 460, 110})
 #define HOME_WX_AREA         ((EpdRect){505, 118, 120, 150})
+/* 首页时间区（时钟+日期，左组）点击进入番茄时钟（用户 2026-10-20 第二十一批 c 段）。 */
+#define HOME_CLOCK_AREA      ((EpdRect){36, 118, 440, 172})
 /* 阅读数据卡每列格子数：每日闭环目标 ÷ HOME_GOAL_CELLS = 每格分钟数。 */
 #define HOME_GOAL_CELLS 6
 
@@ -1377,6 +1379,12 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
             refresh_stats();
             return APP_REDRAW_PAGE;
         }
+        return APP_REDRAW_NONE;
+    }
+    /* 首页时间区点击进入番茄时钟（用户 2026-10-20 第二十一批 c 段）。 */
+    if (ui_rect_hit(HOME_CLOCK_AREA, ev->x0, ev->y0)) {
+        extern const app_desc_t app_pomodoro;
+        ctx->request_app = &app_pomodoro;
         return APP_REDRAW_NONE;
     }
     /* 首页天气区（时钟行右组）点击进入天气设置（用户 2026-10-19）。 */

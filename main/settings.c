@@ -43,6 +43,13 @@
 #define NVS_KEY_AVATAR "dev_avatar"
 #define NVS_KEY_STATUS_SIGNATURE "status_sig"
 #define NVS_KEY_CLOCK_ALM "clk_alm"
+/* 第二十一批 c 段（2026-10-20）：闹钟（PMU 硬件闹钟）/番茄时长/木鱼功德。 */
+#define NVS_KEY_ALARM_ON    "alm_on"
+#define NVS_KEY_ALARM_HOUR  "alm_h"
+#define NVS_KEY_ALARM_MIN   "alm_m"
+#define NVS_KEY_POMO_WORK   "pomo_w"
+#define NVS_KEY_POMO_BREAK  "pomo_b"
+#define NVS_KEY_MUYU_COUNT  "muyu_c"
 #define NVS_KEY_FONT "font"
 #define NVS_KEY_SYS_FONT "sys_font"
 #define NVS_KEY_SYS_SIZE "sys_size"
@@ -123,6 +130,11 @@ static uint8_t s_book_line = 130, s_book_para = 50, s_book_margin = 24;
 static bool s_reader_power_turn;
 static bool s_reader_immersive = true;  /* 2026-10-17：默认全屏沉浸（参照 rc95：新开书即无状态栏） */
 static bool s_clock_almanac = true;     /* 2026-10-17：时钟锁屏下方农历/老黄历显示开关 */
+static bool s_alarm_enabled;           /* 闹钟开关（PMU RTC 硬件闹钟，主机负责每日重排） */
+static uint8_t s_alarm_hour, s_alarm_minute;
+static uint8_t s_pomo_work = 25;        /* 番茄专注时长（15..60，步进 5） */
+static uint8_t s_pomo_break = 5;        /* 番茄休息时长（5..60，步进 5） */
+static uint32_t s_muyu_count;           /* 木鱼功德累计 */
 static bool s_reader_hide_images;
 static bool s_reader_hold_refresh;
 static const char *s_reader_key_names[] = {"rd_key_l", "rd_key_m", "rd_key_r"};
@@ -231,6 +243,16 @@ void app_settings_init(void) {
         s_status_signature[0] = 0;
     uint8_t clock_alm = 1;
     if (nvs_get_u8(h, NVS_KEY_CLOCK_ALM, &clock_alm) == ESP_OK) s_clock_almanac = clock_alm == 1;
+    {   /* 闹钟/番茄/木鱼（第二十一批 c 段）：越界田退回默认。 */
+        uint8_t raw = 0;
+        if (nvs_get_u8(h, NVS_KEY_ALARM_ON, &raw) == ESP_OK) s_alarm_enabled = raw == 1;
+        if (nvs_get_u8(h, NVS_KEY_ALARM_HOUR, &raw) == ESP_OK && raw < 24) s_alarm_hour = raw;
+        if (nvs_get_u8(h, NVS_KEY_ALARM_MIN, &raw) == ESP_OK && raw < 60) s_alarm_minute = raw;
+        if (nvs_get_u8(h, NVS_KEY_POMO_WORK, &raw) == ESP_OK && raw >= 15 && raw <= 60 && raw % 5 == 0) s_pomo_work = raw;
+        if (nvs_get_u8(h, NVS_KEY_POMO_BREAK, &raw) == ESP_OK && raw >= 5 && raw <= 60 && raw % 5 == 0) s_pomo_break = raw;
+        uint32_t count = 0;
+        if (nvs_get_u32(h, NVS_KEY_MUYU_COUNT, &count) == ESP_OK) s_muyu_count = count;
+    }
     for (int ti = 0; ti < 3; ++ti) {
         char tkey[8]; snprintf(tkey, sizeof(tkey), "todo%d", ti + 1);
         value_len = sizeof(s_todo[ti]);
@@ -858,6 +880,47 @@ void app_settings_set_clock_almanac(bool on) {
     if (s_clock_almanac == on) return;
     s_clock_almanac = on;
     nvs_put_u8(NVS_KEY_CLOCK_ALM, on ? 1 : 0);
+}
+/* ---- 闹钟/番茄/木鱼（第二十一批 c 段，用户 2026-10-20）---- */
+bool app_settings_alarm_enabled(void) { return s_alarm_enabled; }
+uint8_t app_settings_alarm_hour(void) { return s_alarm_hour; }
+uint8_t app_settings_alarm_minute(void) { return s_alarm_minute; }
+esp_err_t app_settings_set_alarm(bool enabled, uint8_t hour, uint8_t minute) {
+    if (enabled && hour >= 24) return ESP_ERR_INVALID_ARG;
+    if (minute >= 60) return ESP_ERR_INVALID_ARG;
+    if (s_alarm_enabled == enabled && s_alarm_hour == hour && s_alarm_minute == minute) return ESP_OK;
+    s_alarm_enabled = enabled;
+    s_alarm_hour = hour;
+    s_alarm_minute = minute;
+    nvs_put_u8(NVS_KEY_ALARM_ON, enabled ? 1 : 0);
+    nvs_put_u8(NVS_KEY_ALARM_HOUR, hour);
+    nvs_put_u8(NVS_KEY_ALARM_MIN, minute);
+    return ESP_OK;
+}
+uint8_t app_settings_pomo_work(void) { return s_pomo_work; }
+uint8_t app_settings_pomo_break(void) { return s_pomo_break; }
+esp_err_t app_settings_set_pomo(uint8_t work, uint8_t brk) {
+    if (work < 15 || work > 60 || work % 5 || brk < 5 || brk > 60 || brk % 5)
+        return ESP_ERR_INVALID_ARG;
+    esp_err_t err = ESP_OK;
+    if (work != s_pomo_work) {
+        err = home_preference_save(NVS_KEY_POMO_WORK, work);
+        if (err == ESP_OK) s_pomo_work = work;
+    }
+    if (err == ESP_OK && brk != s_pomo_break) {
+        err = home_preference_save(NVS_KEY_POMO_BREAK, brk);
+        if (err == ESP_OK) s_pomo_break = brk;
+    }
+    return err;
+}
+uint32_t app_settings_muyu_count(void) { return s_muyu_count; }
+void app_settings_set_muyu_count(uint32_t count) {
+    if (s_muyu_count == count) return;
+    s_muyu_count = count;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_u32(h, NVS_KEY_MUYU_COUNT, count) == ESP_OK) (void)nvs_commit(h);
+    nvs_close(h);
 }
 void app_settings_set_shelf_style(uint8_t style) {
     if (style < 1 || style > 5) return;

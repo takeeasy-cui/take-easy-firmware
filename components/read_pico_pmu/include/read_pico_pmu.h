@@ -203,6 +203,14 @@ bool read_pico_pmu_take_key_short(void);
 /// 抽干队列；按下或短按都算唤醒（浅睡常先收到 KEY_DOWN）。
 /// / Drain the queue; KEY_DOWN or SHORT both count as wake (light sleep often sees KEY_DOWN first).
 bool read_pico_pmu_take_key_wakeup(void);
+/* ---- 硬件闹钟（第二十一批 c 段，2026-10-20）----
+ * PMU RTC 独立走时：主机关机/深睡不影响，到点推 ALARM_FIRED 且主机关机时自动开机
+ * （wake_reason=6）。mode：0=关 1=单次；seconds=距现在的相对秒（10s..31 天）。
+ * CW 断电/复位后闹钟丢失，主机开机时须重新武装（alarm_ensure_boot）。 */
+esp_err_t read_pico_pmu_alarm_set(uint8_t mode, uint32_t seconds);
+/// 取走并清除「闹钟已到点」锁存；ALARM_FIRED 在任何事件抽阅路径都会锁存，防 ack 丢失。
+/// / Take and clear the ALARM_FIRED latch set by any event-draining path.
+bool read_pico_pmu_take_alarm(void);
 /// 保证 RUNNING 后发 HOST_SOFT_SLEEP，等到 STATUS 为 SOFT_SLEEP（随后 EN=0）。
 /// / After RUNNING, send HOST_SOFT_SLEEP and wait for STATUS SOFT_SLEEP (then EN=0).
 esp_err_t read_pico_pmu_report_sleep(void);

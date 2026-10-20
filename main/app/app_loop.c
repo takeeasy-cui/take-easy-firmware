@@ -37,6 +37,7 @@
 
 #include "app_loop.h"
 #include "auto_lock.h"
+#include "alarm.h"
 #include "crash_note.h"
 
 #include <string.h>
@@ -879,6 +880,13 @@ void app_loop_run(const app_loop_config_t* config) {
                         else app_present(&ctx, current, APP_REDRAW_PAGE);
                     }
                 }
+            }
+            /* 闹钟事件消费（第二十一批 c 段，2026-10-20）：ALARM_FIRED 已在按键
+             * 轮询中锁存（事件驱动，非时间轮询）；响铃页接管后重画当前页。 */
+            if (alarm_consume_ring(ctx.hl, ctx.fb, ctx.tp)) {
+                held_key = -1;
+                cancel_gesture(&ctx, current, &gesture);
+                app_present(&ctx, current, APP_REDRAW_PAGE);
             }
         }
 
