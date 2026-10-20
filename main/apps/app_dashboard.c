@@ -662,7 +662,10 @@ static void draw_home_card(uint8_t* fb, EpdRect card, home_book_t* item, bool fo
     int block_h = (card.height - 4) / 2;
     /* 2026-10-17：色块左右与书本封面对齐不再超出，底边与封面底齐平。 */
     EpdRect block = {card.x + 2, card.y + card.height - 2 - block_h, card.width - 4, block_h};
-    ui_draw_acrylic_plain(fb, block);
+    /* 21f（2026-10-20 真机反馈）：色块不再用跟随封面底色的亚克力（黑封面时色块变深灰、
+     * 块上黑字不可读）——改固定浅灰底，任何封面（含纯黑真封面）下内容都清晰；
+     * 快刷稳定点阵转换（ui_acrylic_bw_rect 按最终像素转换）保留不变。 */
+    ui_fill_round_rect(fb, block, NX_R_SM, 0xe6);
     if (app_settings_main_fast_refresh()) ui_acrylic_bw_rect(fb, block);
     /* 书卡色块边框 2px 纯黑（对齐状态栏，2026-10-17）。 */
     ui_draw_control_frame(fb, block, NX_R_SM, NX8_INK);
@@ -1328,16 +1331,28 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         return;
     }
     draw_clockrow(fb);
-    /* 2026-10-17：各区域间隙统一（≈44px 节奏）。v8（用户 2026-10-20）：本区双态
-     * ——继续阅读 / 随心记（最近便签预览），区内下滑切换、再滑/上滑切回。 */
-    int y = draw_tag(fb, 320, s_home_notes ? "随心记" : "继续阅读", true);
+    /* 书卡区：恢复单态（继续阅读）。21f（2026-10-20 真机反馈）：随心记双态区
+     * 原做在书卡区，用户拍板应改为「阅读数据」区下滑切换——下方 stats 区承载。 */
+    int y = draw_tag(fb, 320, "继续阅读", true);
+    {
+        int card_w = (684 - 2 * NX_MARGIN - HOME_CARD_GAP) / 2;
+        for (int i = 0; i < 2; ++i) {
+            EpdRect card = {NX_MARGIN + (card_w + HOME_CARD_GAP) * i, y, card_w, HOME_CARD_H};
+            s_layout.cards[i] = card;
+            draw_home_card(fb, card, s_card_books[i], i == 0);
+        }
+    }
+    y = draw_tag(fb, y + HOME_CARD_H + 44, s_home_notes ? "随心记" : "阅读数据", true);
+    s_layout.stats = (EpdRect){NX_MARGIN, y, 684 - 2 * NX_MARGIN, 230};
+    s_notes_zone = s_layout.stats;
     if (s_home_notes) {
-        EpdRect card = {NX_MARGIN, y, 684 - 2 * NX_MARGIN, HOME_CARD_H};
+        /* 随心记预览：最近便签折行 3 行（30px/行高 52）+ 日期与提示行。 */
+        EpdRect card = s_layout.stats;
         ui_fill_round_rect(fb, card, NX_R_CARD, NX8_PAPER);
         ui_draw_control_frame(fb, card, NX_R_CARD, NX8_INK);
         const char *p = s_note_line;
-        int line_y = card.y + 60;
-        for (int row = 0; row < 5 && *p; ++row) {
+        int line_y = card.y + 52;
+        for (int row = 0; row < 3 && *p; ++row) {
             char line[112];
             size_t use = 0;
             while (*p && use + 4 < sizeof(line)) {
@@ -1351,23 +1366,14 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
             line_y += 52;
         }
         if (!s_note_line[0])
-            ui_text_vc(fb, card.x + 48, card.y + 60, 30, "还没有便签，点击这里新建", EPD_DRAW_ALIGN_LEFT, false);
+            ui_text_vc(fb, card.x + 48, card.y + 52, 30, "还没有便签，点击这里新建", EPD_DRAW_ALIGN_LEFT, false);
         if (s_note_date[0])
-            ui_text_vc(fb, card.x + 48, card.y + HOME_CARD_H - 40, 20, s_note_date, EPD_DRAW_ALIGN_LEFT, false);
-        ui_text_vc(fb, card.x + card.width - 48, card.y + HOME_CARD_H - 40, 18,
-                   "点击进入 · 再滑切回阅读", EPD_DRAW_ALIGN_RIGHT, false);
+            ui_text_vc(fb, card.x + 48, card.y + card.height - 32, 18, s_note_date, EPD_DRAW_ALIGN_LEFT, false);
+        ui_text_vc(fb, card.x + card.width - 48, card.y + card.height - 32, 16,
+                   "点击进入 · 再滑切回阅读数据", EPD_DRAW_ALIGN_RIGHT, false);
     } else {
-        int card_w = (684 - 2 * NX_MARGIN - HOME_CARD_GAP) / 2;
-        for (int i = 0; i < 2; ++i) {
-            EpdRect card = {NX_MARGIN + (card_w + HOME_CARD_GAP) * i, y, card_w, HOME_CARD_H};
-            s_layout.cards[i] = card;
-            draw_home_card(fb, card, s_card_books[i], i == 0);
-        }
+        draw_stats(fb);
     }
-    s_notes_zone = (EpdRect){0, 320, 684, y - 320 + HOME_CARD_H};
-    y = draw_tag(fb, y + HOME_CARD_H + 44, "阅读数据", true);
-    s_layout.stats = (EpdRect){NX_MARGIN, y, 684 - 2 * NX_MARGIN, 230};
-    draw_stats(fb);
     ui_nav_draw(fb, 0);
 }
 
@@ -1560,6 +1566,13 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
         if (!s_home_notes && ev->type == UI_GESTURE_SWIPE_D) { s_home_notes = true; return APP_REDRAW_PAGE; }
         if (s_home_notes) { s_home_notes = false; return APP_REDRAW_PAGE; }
         return APP_REDRAW_NONE;
+    }
+    /* v9（第二十一批 e 段）：时钟行右组长按（任意组件态）= 组件五选一选项页。
+     * 21f 注：21e 编辑事故中此入口块静默丢失（选项页有渲染无入口），真机表现为长按无反应，重新插入。 */
+    if (ev->type == UI_GESTURE_LONG_PRESS && !s_wx_setup && !s_goal_open &&
+        ui_rect_hit(HOME_WX_AREA, ev->x0, ev->y0)) {
+        s_wx_pick = true;
+        return APP_REDRAW_FULL;
     }
     if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
     /* v6：阅读数据面板恢复导航栏，导航带命中放开（点击切页离开面板自动收尾）；天气设置页保留。 */

@@ -69,7 +69,9 @@ bool app_settings_clock_almanac(void);
 void app_settings_set_clock_almanac(bool on);
 /* ---- 闹钟（PMU 硬件闹钟，用户 2026-10-20 第二十一批 c 段）----
  * 闹钟独立于锁屏模式：PMU RTC 到点推 ALARM_FIRED，主机关机则自动开机
- * （wake_reason=6）。每日循环由主机响铃时重排实现（PMU 只设单次）。 */
+ * （wake_reason=6）。每日循环由主机响铃时重排实现（PMU 只设单次）。
+ * 21f（2026-10-20）：闹钟 UI/响铃链路已下线（真机反馈不响），本组存取与
+ * alarm.c / PMU 驱动底层保留，后期恢复只需在 UI 加回调用点。 */
 bool app_settings_alarm_enabled(void);
 uint8_t app_settings_alarm_hour(void);
 uint8_t app_settings_alarm_minute(void);

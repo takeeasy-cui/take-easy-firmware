@@ -30,7 +30,6 @@
 #include "epdiy.h"
 #include "esp_log.h"
 #include "ota_update.h"
-#include "alarm.h"
 #include "pmu_selftest.h"
 #include "soc/rtc_cntl_reg.h"
 #include "read_pico_board.h"
@@ -150,14 +149,8 @@ void app_main(void) {
     // Confirm a new slot only after hardware, display, touch, and required setup succeed.
     pico_ota_confirm_running();
 
-    /* 闹钟响铃（第二十一批 c 段，2026-10-20）：PMU 闹钟到点自动开机
-     * （wake_reason=6）或事件锁存——开机先响铃再走锁屏验证
-     * （被闹钟叫醒不必先输密码）。响铃停止时已重排下一个 HH:MM。 */
-    if (hw.pmu_ready && alarm_boot_should_ring()) {
-        alarm_ring_page(&hl, framebuffer, hw.touch);
-    }
-    /* 开机自愈：闹钟开时重设 PMU 闹钟（CW 断电/复位后闹钟丢失，协议明示）。 */
-    if (hw.pmu_ready) (void)alarm_pmu_arm();
+    /* 21f（2026-10-20 真机反馈，闹钟不响，用户拍板下线）：开机响铃与 PMU 自愈重排
+     * 已移除；底层能力保留在 alarm.c / read_pico_pmu / settings，后期直调即可。 */
 
     app_lock_boot_gate(&hl, hw.touch, hw.sensor);
     rp_boot_mark("lock");

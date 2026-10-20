@@ -7,13 +7,16 @@
  *    用户 2026-10-20 拍板与首页/锁屏时间同款）；
  *  - 离开页面 = 暂停（保留剩余与阶段）；锁屏浅睡不暂停（esp_timer 走时），
  *    回页后 on_tick 自动结算跨过的阶段；
- *  - 双入口：首页点击时间区 / 应用页图标（推理游戏前，游戏殿后）；
- *  - 闹钟设置入口在本页（用户拍板）：PMU 硬件闹钟，关机也会响，独立于锁屏模式。
+ *  - 双入口：首页点击时间区 / 应用页图标（推理游戏前，游戏殿后）。
+ * 21f（2026-10-20 真机反馈修复）：
+ *  - 闹钟子页整体下线（用户反馈闹钟不响；底层 alarm.c / PMU 驱动 / settings
+ *    存取全部保留，后期恢复只需加回 UI 调用点）；
+ *  - 节奏设置页布局重排：休息点阵区与按钮行重叠修复（v1 几何推算错误）；
+ *  - 分钟自绘：APP_REDRAW_AREA 框架只推屏不调 render，on_tick 自己画数字区。
  */
 #include <stdio.h>
 #include <string.h>
 
-#include "alarm.h"
 #include "app.h"
 #include "display.h"
 #include "esp_timer.h"
@@ -24,7 +27,7 @@
 #include "ui_menu.h"
 #include "ui_nothing.h"
 
-typedef enum { VIEW_MAIN = 0, VIEW_ALARM, VIEW_SETUP } pomo_view_t;
+typedef enum { VIEW_MAIN = 0, VIEW_SETUP } pomo_view_t;
 typedef enum { RUN_IDLE = 0, RUN_FOCUS, RUN_BREAK } pomo_run_t;
 
 static pomo_view_t s_view;
@@ -34,16 +37,22 @@ static int64_t s_end_us;          /* 运行中：本阶段结束时刻（esp_tim
 static int64_t s_pause_left_us;   /* 暂停时剩余 us */
 static int s_done;                /* 本次会话完成番茄数 */
 static int s_show_min = -1;       /* 上次上屏的分钟数 */
-static int s_alarm_h, s_alarm_m;  /* 闹钟编辑缓冲 */
 static int s_edit_w, s_edit_b;    /* 节奏编辑缓冲 */
 static char s_notice[80];
 
-/* ---- 布局（绘制与命中共用一套几何）---- */
-static EpdRect btn_row(int row) { return (EpdRect){36, 720 + row * 110, 296, 84}; }
-static EpdRect btn_row_r(int row) { return (EpdRect){352, 720 + row * 110, 296, 84}; }
-/* 闹钟/设置子页的独立按钮带。 */
-static EpdRect sub_btn(int row, bool right) {
-    return (EpdRect){right ? 352 : 36, 480 + row * 110, 296, 84};
+/* ---- 布局（绘制与命中共用一套几何）----
+ * 主页：行 0 = 开始/暂停 + 重置（720..804）；行 1 = 节奏设置全宽（830..914）。
+ * 设置页：专注区（标签 160/点阵 195..321/分钟 345/按钮 380..464）
+ *        → 休息区（标签 510/点阵 545..671/分钟 695/按钮 730..814）
+ *        → 保存/返回 860..944。v1 的 sub_btn(480+row*110) 与休息区重叠，作废。 */
+static EpdRect btn_row(void) { return (EpdRect){36, 720, 296, 84}; }
+static EpdRect btn_row_r(void) { return (EpdRect){352, 720, 296, 84}; }
+static EpdRect btn_setup(void) { return (EpdRect){36, 830, 612, 84}; }
+static EpdRect setup_btn(int row, bool right) {
+    return (EpdRect){right ? 352 : 36, row == 0 ? 380 : 730, 296, 84};
+}
+static EpdRect setup_save_rect(bool right) {
+    return (EpdRect){right ? 352 : 36, 860, 296, 84};
 }
 
 static int pomo_remaining_min(void) {
@@ -67,8 +76,6 @@ static const char* pomo_state_label(void) {
 /* ---- 主页 ---- */
 static void render_main(uint8_t* fb) {
     ui_text(fb, 36, 54, 40, "番茄时钟", EPD_DRAW_ALIGN_LEFT, false);
-    ui_text_fixed(fb, 648, 66, 24, app_settings_alarm_enabled() ? "闹钟开" : "闹钟关",
-                  EPD_DRAW_ALIGN_RIGHT, false);
     ui_hairline(fb, 116, 36, 612, NX8_GRID);
     ui_text_vc(fb, 342, 210, 34, pomo_state_label(), EPD_DRAW_ALIGN_CENTER, false);
     char cs[8];
@@ -83,10 +90,9 @@ static void render_main(uint8_t* fb) {
     if (s_notice[0]) ui_text_vc(fb, 342, 660, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
     const char* main_label = s_run == RUN_IDLE ? "开始专注"
                              : s_paused ? "继续" : "暂停";
-    ui_draw_button(fb, btn_row(0), main_label, false);
-    ui_draw_button(fb, btn_row_r(0), "重置", false);
-    ui_draw_button(fb, btn_row(1), "闹钟", app_settings_alarm_enabled());
-    ui_draw_button(fb, btn_row_r(1), "节奏设置", false);
+    ui_draw_button(fb, btn_row(), main_label, false);
+    ui_draw_button(fb, btn_row_r(), "重置", false);
+    ui_draw_button(fb, btn_setup(), "节奏设置", false);
     ui_text_vc(fb, 342, 1010, 22,
                "专注与休息自动交替 · 阶段结束有提示音", EPD_DRAW_ALIGN_CENTER, false);
 }
@@ -100,7 +106,8 @@ static void pomo_reset(void) {
 }
 
 static app_redraw_t main_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
-    if (ui_rect_hit(btn_row(0), x, y)) {
+    (void)ctx;
+    if (ui_rect_hit(btn_row(), x, y)) {
         if (s_run == RUN_IDLE) {
             s_run = RUN_FOCUS;
             s_end_us = esp_timer_get_time() + (int64_t)app_settings_pomo_work() * 60000000LL;
@@ -122,15 +129,8 @@ static app_redraw_t main_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
         }
         return APP_REDRAW_PAGE;
     }
-    if (ui_rect_hit(btn_row_r(0), x, y)) { pomo_reset(); return APP_REDRAW_PAGE; }
-    if (ui_rect_hit(btn_row(1), x, y)) {
-        s_view = VIEW_ALARM;
-        s_alarm_h = app_settings_alarm_hour();
-        s_alarm_m = app_settings_alarm_minute();
-        s_notice[0] = 0;
-        return APP_REDRAW_PAGE;
-    }
-    if (ui_rect_hit(btn_row_r(1), x, y)) {
+    if (ui_rect_hit(btn_row_r(), x, y)) { pomo_reset(); return APP_REDRAW_PAGE; }
+    if (ui_rect_hit(btn_setup(), x, y)) {
         s_view = VIEW_SETUP;
         s_edit_w = app_settings_pomo_work();
         s_edit_b = app_settings_pomo_break();
@@ -140,101 +140,47 @@ static app_redraw_t main_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
     return APP_REDRAW_NONE;
 }
 
-/* ---- 闹钟子页 ---- */
-static void render_alarm(uint8_t* fb) {
-    ui_text(fb, 36, 54, 40, "闹钟", EPD_DRAW_ALIGN_LEFT, false);
-    ui_hairline(fb, 116, 36, 612, NX8_GRID);
-    char cs[8];
-    snprintf(cs, sizeof(cs), "%02d:%02d", s_alarm_h, s_alarm_m);
-    const int pitch = 24, dr = 11;
-    int w = nothing_dot_text_w(cs, pitch);
-    nothing_dot_text(fb, (684 - w) / 2, 190, cs, dr, pitch, NX8_INK);
-    char st[64];
-    if (app_settings_alarm_enabled())
-        snprintf(st, sizeof(st), "已开启 · 每天 %02d:%02d 响",
-                 app_settings_alarm_hour(), app_settings_alarm_minute());
-    else
-        snprintf(st, sizeof(st), "未开启");
-    ui_text_vc(fb, 342, 400, 26, st, EPD_DRAW_ALIGN_CENTER, false);
-    ui_draw_button(fb, sub_btn(0, false), "时 −", false);
-    ui_draw_button(fb, sub_btn(0, true), "时 +", false);
-    ui_draw_button(fb, sub_btn(1, false), "分 −", false);
-    ui_draw_button(fb, sub_btn(1, true), "分 +", false);
-    ui_draw_button(fb, sub_btn(2, false), app_settings_alarm_enabled() ? "关闭闹钟" : "开启闹钟",
-                   app_settings_alarm_enabled());
-    ui_draw_button(fb, sub_btn(2, true), "返回", false);
-    ui_text_vc(fb, 342, 900, 22, "闹钟由电源芯片独立计时 · 关机也会响",
-               EPD_DRAW_ALIGN_CENTER, false);
-    if (s_notice[0]) ui_text_vc(fb, 342, 950, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
-}
-
-static app_redraw_t alarm_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
-    (void)ctx;
-    if (ui_rect_hit(sub_btn(0, false), x, y)) s_alarm_h = (s_alarm_h + 23) % 24;
-    else if (ui_rect_hit(sub_btn(0, true), x, y)) s_alarm_h = (s_alarm_h + 1) % 24;
-    else if (ui_rect_hit(sub_btn(1, false), x, y)) s_alarm_m = (s_alarm_m + 59) % 60;
-    else if (ui_rect_hit(sub_btn(1, true), x, y)) s_alarm_m = (s_alarm_m + 1) % 60;
-    else if (ui_rect_hit(sub_btn(2, false), x, y)) {
-        bool on = app_settings_alarm_enabled();
-        if (app_settings_set_alarm(!on, (uint8_t)s_alarm_h, (uint8_t)s_alarm_m) != ESP_OK
-            || alarm_pmu_arm() != ESP_OK) {
-            snprintf(s_notice, sizeof(s_notice), "闹钟设置失败，请重试");
-        } else {
-            snprintf(s_notice, sizeof(s_notice), on ? "闹钟已关闭" : "闹钟已开启");
-        }
-        return APP_REDRAW_PAGE;
-    }
-    else if (ui_rect_hit(sub_btn(2, true), x, y)) {
-        s_view = VIEW_MAIN;
-        s_notice[0] = 0;
-        return APP_REDRAW_PAGE;
-    } else {
-        return APP_REDRAW_NONE;
-    }
-    return APP_REDRAW_PAGE;   /* 时/分步进：整页轻刷（子页面积小，无局部优化必要） */
-}
-
 /* ---- 节奏设置子页 ---- */
 static void render_setup(uint8_t* fb) {
     ui_text(fb, 36, 54, 40, "节奏设置", EPD_DRAW_ALIGN_LEFT, false);
     ui_hairline(fb, 116, 36, 612, NX8_GRID);
-    ui_text_vc(fb, 342, 170, 28, "专注", EPD_DRAW_ALIGN_CENTER, false);
+    const int pitch = 18, dr = 8;
+    ui_text_vc(fb, 342, 160, 28, "专注", EPD_DRAW_ALIGN_CENTER, false);
     char cw[8];
     snprintf(cw, sizeof(cw), "%d", s_edit_w);
-    const int pitch = 22, dr = 10;
     int w = nothing_dot_text_w(cw, pitch);
-    nothing_dot_text(fb, (684 - w) / 2, 210, cw, dr, pitch, NX8_INK);
-    ui_text_vc(fb, 342, 380, 22, "分钟", EPD_DRAW_ALIGN_CENTER, false);
-    ui_draw_button(fb, sub_btn(0, false), "专注 −", false);
-    ui_draw_button(fb, sub_btn(0, true), "专注 +", false);
-    ui_text_vc(fb, 342, 490, 28, "休息", EPD_DRAW_ALIGN_CENTER, false);
+    nothing_dot_text(fb, (684 - w) / 2, 195, cw, dr, pitch, NX8_INK);
+    ui_text_vc(fb, 342, 345, 20, "分钟", EPD_DRAW_ALIGN_CENTER, false);
+    ui_draw_button(fb, setup_btn(0, false), "专注 −", false);
+    ui_draw_button(fb, setup_btn(0, true), "专注 +", false);
+    ui_text_vc(fb, 342, 510, 28, "休息", EPD_DRAW_ALIGN_CENTER, false);
     char cb[8];
     snprintf(cb, sizeof(cb), "%d", s_edit_b);
     w = nothing_dot_text_w(cb, pitch);
-    nothing_dot_text(fb, (684 - w) / 2, 530, cb, dr, pitch, NX8_INK);
-    ui_text_vc(fb, 342, 700, 22, "分钟", EPD_DRAW_ALIGN_CENTER, false);
-    ui_draw_button(fb, sub_btn(1, false), "休息 −", false);
-    ui_draw_button(fb, sub_btn(1, true), "休息 +", false);
-    ui_draw_button(fb, sub_btn(2, false), "保存", false);
-    ui_draw_button(fb, sub_btn(2, true), "返回", false);
-    ui_text_vc(fb, 342, 900, 22, "专注 15..60 · 休息 5..60 · 步进 5",
+    nothing_dot_text(fb, (684 - w) / 2, 545, cb, dr, pitch, NX8_INK);
+    ui_text_vc(fb, 342, 695, 20, "分钟", EPD_DRAW_ALIGN_CENTER, false);
+    ui_draw_button(fb, setup_btn(1, false), "休息 −", false);
+    ui_draw_button(fb, setup_btn(1, true), "休息 +", false);
+    ui_draw_button(fb, setup_save_rect(false), "保存", false);
+    ui_draw_button(fb, setup_save_rect(true), "返回", false);
+    ui_text_vc(fb, 342, 990, 22, "专注 15..60 · 休息 5..60 · 步进 5",
                EPD_DRAW_ALIGN_CENTER, false);
-    if (s_notice[0]) ui_text_vc(fb, 342, 950, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
+    if (s_notice[0]) ui_text_vc(fb, 342, 1035, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
 }
 
 static app_redraw_t setup_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
     (void)ctx;
-    if (ui_rect_hit(sub_btn(0, false), x, y)) { if (s_edit_w > 15) s_edit_w -= 5; }
-    else if (ui_rect_hit(sub_btn(0, true), x, y)) { if (s_edit_w < 60) s_edit_w += 5; }
-    else if (ui_rect_hit(sub_btn(1, false), x, y)) { if (s_edit_b > 5) s_edit_b -= 5; }
-    else if (ui_rect_hit(sub_btn(1, true), x, y)) { if (s_edit_b < 60) s_edit_b += 5; }
-    else if (ui_rect_hit(sub_btn(2, false), x, y)) {
+    if (ui_rect_hit(setup_btn(0, false), x, y)) { if (s_edit_w > 15) s_edit_w -= 5; }
+    else if (ui_rect_hit(setup_btn(0, true), x, y)) { if (s_edit_w < 60) s_edit_w += 5; }
+    else if (ui_rect_hit(setup_btn(1, false), x, y)) { if (s_edit_b > 5) s_edit_b -= 5; }
+    else if (ui_rect_hit(setup_btn(1, true), x, y)) { if (s_edit_b < 60) s_edit_b += 5; }
+    else if (ui_rect_hit(setup_save_rect(false), x, y)) {
         esp_err_t err = app_settings_set_pomo((uint8_t)s_edit_w, (uint8_t)s_edit_b);
         snprintf(s_notice, sizeof(s_notice),
                  err == ESP_OK ? "已保存，下一轮生效" : "保存失败，请重试");
         return APP_REDRAW_PAGE;
     }
-    else if (ui_rect_hit(sub_btn(2, true), x, y)) {
+    else if (ui_rect_hit(setup_save_rect(true), x, y)) {
         s_view = VIEW_MAIN;
         s_notice[0] = 0;
         return APP_REDRAW_PAGE;
@@ -247,14 +193,12 @@ static app_redraw_t setup_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
 static void render(app_ctx_t* ctx, uint8_t* fb) {
     (void)ctx;
     ui_clear_page(fb);
-    if (s_view == VIEW_ALARM) render_alarm(fb);
-    else if (s_view == VIEW_SETUP) render_setup(fb);
+    if (s_view == VIEW_SETUP) render_setup(fb);
     else render_main(fb);
 }
 
 static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
     if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
-    if (s_view == VIEW_ALARM) return alarm_tap(ctx, ev->x0, ev->y0);
     if (s_view == VIEW_SETUP) return setup_tap(ctx, ev->x0, ev->y0);
     return main_tap(ctx, ev->x0, ev->y0);
 }
@@ -274,8 +218,18 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
     return APP_REDRAW_NONE;          /* 左键无绑定 → 全局快捷菜单 */
 }
 
+/* 主页分钟自绘（21f 根因修复）：APP_REDRAW_AREA 只推屏不调 render，
+ * 回调必须自己把数字区画好——擦旧迹再画新点阵数字，几何与 render_main 一致。 */
+static void pomo_paint_minutes(uint8_t* fb, int minutes) {
+    epd_fill_rect((EpdRect){36, 240, 612, 274}, NX8_PAPER, fb);
+    char cs[8];
+    snprintf(cs, sizeof(cs), "%d", minutes);
+    const int pitch = 36, dr = 16;
+    int w = nothing_dot_text_w(cs, pitch);
+    nothing_dot_text(fb, (684 - w) / 2, 250, cs, dr, pitch, NX8_INK);
+}
+
 static app_redraw_t on_tick(app_ctx_t* ctx) {
-    (void)ctx;
     if (s_view != VIEW_MAIN || s_run == RUN_IDLE || s_paused) return APP_REDRAW_NONE;
     int64_t now = esp_timer_get_time();
     if (now >= s_end_us) {
@@ -300,6 +254,7 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
     int m = pomo_remaining_min();
     if (m != s_show_min) {
         s_show_min = m;
+        pomo_paint_minutes(ctx->fb, m);
         return APP_REDRAW_AREA;
     }
     return APP_REDRAW_NONE;
@@ -307,8 +262,8 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
 
 static EpdRect area_hint(app_ctx_t* ctx) {
     (void)ctx;
-    /* 主页分钟翻转只刷状态+点阵数字+单位行（DU 局部，与首页时钟行同款机制）。 */
-    return (EpdRect){36, 180, 612, 420};
+    /* 只推分钟数字条带（与 pomo_paint_minutes 的擦画区一致，DU 局部最快）。 */
+    return (EpdRect){36, 240, 612, 274};
 }
 
 static void pomo_on_enter(app_ctx_t* ctx) {

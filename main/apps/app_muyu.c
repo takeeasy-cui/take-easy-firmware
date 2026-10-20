@@ -24,6 +24,8 @@ static EpdRect muyu_zone(void) { return (EpdRect){120, 470, 460, 380}; }
 static EpdRect confirm_btn(bool accept) { return (EpdRect){accept ? 36 : 352, 940, 296, 84}; }
 
 static bool s_confirm_reset;
+/* 21f：敲击局部自绘计数区（定义在 on_gesture 之后，先声明）。 */
+static void muyu_paint_count(uint8_t* fb);
 
 static void draw_muyu(uint8_t* fb) {
     /* 圆身（双线描边）+ 前开口（右侧白块擦出）+ 圆点眼 + 斜置槌。 */
@@ -39,6 +41,8 @@ static void draw_muyu(uint8_t* fb) {
 
 static void render(app_ctx_t* ctx, uint8_t* fb) {
     (void)ctx;
+    /* 21f（2026-10-20 真机反馈）：进入木鱼页不清屏，旧页面内容残留——补清屏。 */
+    ui_clear_page(fb);
     ui_text(fb, 36, 54, 40, "木鱼", EPD_DRAW_ALIGN_LEFT, false);
     ui_hairline(fb, 116, 36, 612, NX8_GRID);
     ui_text_vc(fb, 342, 200, 28, "功德", EPD_DRAW_ALIGN_CENTER, false);
@@ -63,7 +67,6 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
 }
 
 static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
-    (void)ctx;
     if (s_confirm_reset) {
         if (ev->type != UI_GESTURE_TAP) return APP_REDRAW_NONE;
         if (ui_rect_hit(confirm_btn(true), ev->x0, ev->y0)) {
@@ -81,6 +84,8 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
     if (ev->type == UI_GESTURE_TAP) {
         app_settings_set_muyu_count(app_settings_muyu_count() + 1);
         read_pico_buzzer_tone(1800, 80);          /* 「笃」 */
+        /* 21f：APP_REDRAW_AREA 只推屏不调 render，回调自己画计数区再返回。 */
+        muyu_paint_count(ctx->fb);
         return APP_REDRAW_AREA;
     }
     if (ev->type == UI_GESTURE_LONG_PRESS) {
@@ -100,10 +105,22 @@ static app_redraw_t on_key(app_ctx_t* ctx, int key) {
     return APP_REDRAW_NONE;          /* 左键无绑定 → 全局快捷菜单 */
 }
 
+/* 21f：敲击自绘计数区（APP_REDRAW_AREA 框架只推屏不调 render，回调自己画）。 */
+static void muyu_paint_count(uint8_t* fb) {
+    epd_fill_rect((EpdRect){36, 230, 612, 230}, NX8_PAPER, fb);
+    uint32_t count = app_settings_muyu_count();
+    if (count > MUYU_DISPLAY_CAP) count = MUYU_DISPLAY_CAP;
+    char cs[16];
+    snprintf(cs, sizeof(cs), "%u", (unsigned)count);
+    const int pitch = 30, dr = 13;
+    int w = nothing_dot_text_w(cs, pitch);
+    nothing_dot_text(fb, (684 - w) / 2, 240, cs, dr, pitch, NX8_INK);
+}
+
 static EpdRect area_hint(app_ctx_t* ctx) {
     (void)ctx;
-    /* 敲击只刷功德点阵数字行（DU 局部，同首页时钟/番茄分钟机制）。 */
-    return (EpdRect){36, 230, 612, 240};
+    /* 21f：只推功德计数条带（与 muyu_paint_count 的擦画区一致）。 */
+    return (EpdRect){36, 230, 612, 230};
 }
 
 static void muyu_on_exit(app_ctx_t* ctx) { (void)ctx; s_confirm_reset = false; }

@@ -37,7 +37,7 @@
 
 #include "app_loop.h"
 #include "auto_lock.h"
-#include "alarm.h"
+/* 21f（2026-10-20）：闹钟链路下线，alarm.h 不再引用（底层保留）。 */
 #include "crash_note.h"
 
 #include <string.h>
@@ -881,13 +881,7 @@ void app_loop_run(const app_loop_config_t* config) {
                     }
                 }
             }
-            /* 闹钟事件消费（第二十一批 c 段，2026-10-20）：ALARM_FIRED 已在按键
-             * 轮询中锁存（事件驱动，非时间轮询）；响铃页接管后重画当前页。 */
-            if (alarm_consume_ring(ctx.hl, ctx.fb, ctx.tp)) {
-                held_key = -1;
-                cancel_gesture(&ctx, current, &gesture);
-                app_present(&ctx, current, APP_REDRAW_PAGE);
-            }
+            /* 21f：闹钟事件消费随闹钟下线移除（ALARM_FIRED 锁存能力在 PMU 驱动保留）。 */
         }
 
         // 设置里存的字体在 SD 卡上，开机时卡可能还没挂好，这里定期重试。

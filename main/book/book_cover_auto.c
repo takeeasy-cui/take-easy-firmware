@@ -233,12 +233,15 @@ static void paper_grain(cover_canvas_t *c, uint64_t seed, uint8_t base) {
         }
 }
 
-static void dark_library(cover_canvas_t *c, const char *title, const char *author, uint64_t seed) {
-    uint8_t bg = (uint8_t)(3 + ((seed >> 8) & 1u));
+static void paper_library(cover_canvas_t *c, const char *title, const char *author, uint64_t seed) {
+    /* 21f（2026-10-20 真机反馈）：原纯黑底模板（bg 3/4 + 白双圈）残影重，且黑封面
+     * 与首页色块叠加后色块上内容不可读——调整为纸色底 + 深色双圈 + 黑字；
+     * BOOK_AUTO_COVER_VERSION 已升版，旧黑封面缓存自动失效重生成。 */
+    uint8_t bg = (uint8_t)(13 + ((seed >> 8) & 1u));
     fill(c, 0, 0, (int)c->width, (int)c->height, bg);
     paper_grain(c, seed, bg);
-    outline(c, xy(7, c->width, 176), 14);
-    outline(c, xy(10, c->width, 176), 12);
+    outline(c, xy(7, c->width, 176), 4);
+    outline(c, xy(10, c->width, 176), 9);
     char lines[COVER_LINE_MAX][COVER_TEXT_CAP];
     int px = title_lines(title, font_px(c, 30), font_px(c, 17),
                          (int)c->width - xy(34, c->width, 176),
@@ -248,13 +251,13 @@ static void dark_library(cover_canvas_t *c, const char *title, const char *autho
     int step = px + xy(6, c->height, 240);
     int top = xy(author && *author ? 102 : 111, c->height, 240) - count * step / 2;
     for (int i = 0; i < count; ++i)
-        draw_text(c, (int)c->width / 2, top + i * step, px, lines[i], EPD_DRAW_ALIGN_CENTER, 15, bg);
+        draw_text(c, (int)c->width / 2, top + i * step, px, lines[i], EPD_DRAW_ALIGN_CENTER, 2, bg);
     int rule_y = xy(author && *author ? 186 : 190, c->height, 240);
-    fill(c, xy(65, c->width, 176), rule_y, xy(111, c->width, 176), rule_y + 1, 13);
+    fill(c, xy(65, c->width, 176), rule_y, xy(111, c->width, 176), rule_y + 1, 5);
     if (author && *author)
         draw_author(c, author, (int)c->width / 2, xy(198, c->height, 240),
                     (int)c->width - xy(46, c->width, 176), font_px(c, 15),
-                    EPD_DRAW_ALIGN_CENTER, 14, bg);
+                    EPD_DRAW_ALIGN_CENTER, 3, bg);
 }
 
 static void modern_whitespace(cover_canvas_t *c, const char *title, const char *author, uint64_t seed) {
@@ -324,7 +327,7 @@ bool book_auto_cover_render(const char *identity, const char *title, const char 
     cover_canvas_t canvas = {.fb = scratch, .width = width, .height = height, .stride = stride};
     uint64_t seed = cover_seed(identity);
     switch (seed % 3u) {
-        case 0: dark_library(&canvas, title, author, seed); break;
+        case 0: paper_library(&canvas, title, author, seed); break;
         case 1: modern_whitespace(&canvas, title, author, seed); break;
         default: split_dark_cover(&canvas, title, author, seed); break;
     }

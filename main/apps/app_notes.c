@@ -237,14 +237,17 @@ static EpdRect row_rect(int i) { return (EpdRect){36, 156 + i * NOTES_ROW_H, 612
 static EpdRect new_button_rect(void) { return (EpdRect){36, 1000, 612, 84}; }
 
 static void render_list(uint8_t *fb) {
+    /* 21f（2026-10-20 真机反馈，三 bug 同根因）：notes_scan 原只在进 app（on_enter）
+     * 触发，保存/删除后 s_loaded=false 但列表从未重扫——新建不显示、编辑不更新、
+     * 删除后条目还在（文件其实已写/已删，列表是旧缓存）。统一在渲染前兜底重扫。 */
+    if (!s_loaded) notes_scan();
     int shown = s_count - s_page * NOTES_PER_PAGE;
     if (shown > NOTES_PER_PAGE) shown = NOTES_PER_PAGE;
     if (shown < 0) shown = 0;
     ui_text_vc(fb, 342, 106, 34, "便签", EPD_DRAW_ALIGN_CENTER, false);
-    char sub[56];
-    if (s_delete_idx >= 0) snprintf(sub, sizeof(sub), "确认删除这条便签？");
-    else snprintf(sub, sizeof(sub), "共 %d 条 · TF 卡 notes 文件夹", s_count);
-    ui_text_vc(fb, 342, 150, 18, sub, EPD_DRAW_ALIGN_CENTER, false);
+    /* 21f（用户拍板）：删除「共 N 条 · TF 卡」提示行，仅删除确认态保留提示。 */
+    if (s_delete_idx >= 0)
+        ui_text_vc(fb, 342, 150, 18, "确认删除这条便签？", EPD_DRAW_ALIGN_CENTER, false);
     for (int i = 0; i < shown; ++i) {
         int idx = s_page * NOTES_PER_PAGE + i;
         EpdRect r = row_rect(i);
