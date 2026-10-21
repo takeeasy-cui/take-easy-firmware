@@ -55,6 +55,7 @@ static int s_day_count;
 static bool s_task_running;
 static int64_t s_last_attempt_ms;
 static int64_t s_refresh_done_ms;   /* 完成时刻，tick 判定"刚完成" */
+static bool s_net_was_ready;   /* 22g：上次 tick 联网态，检测联网上升沿（每次联网强制拉取）。 */
 static bool s_fetch_ok;
 
 /* NVS 配置（设置页写入；优先于 TF 卡 weather.txt，用户 2026-10-19）。
@@ -580,16 +581,23 @@ int weather_low(void) { int i = today_index(); return i < 0 ? 0 : s_days[i].low;
 
 bool weather_service_tick(bool network_ready) {
     load_config();
-    if (!s_city_cfg[0] || !s_key[0] || !network_ready) return false;
+    if (!s_city_cfg[0] || !s_key[0] || !network_ready) {
+        s_net_was_ready = false;
+        return false;
+    }
     /* 完成上报（任务结束后的下一次 tick）：报告一次即清零，避免重复重绘。 */
     int64_t now_ms = esp_timer_get_time() / 1000;
     if (refresh_just_done(now_ms)) {
         s_refresh_done_ms = 0;
         return true;
     }
-    if (s_day_count && covered_today()) return false;
+    /* 22g（用户 2026-10-21：“每次联网都拉取”）：联网上升沿强制拉取一次，
+     * 不再受“缓存已覆盖今天”与失败退避压制——联网后天气立刻更新。 */
+    const bool just_online = !s_net_was_ready;
+    s_net_was_ready = true;
+    if (!just_online && s_day_count && covered_today()) return false;
     if (s_task_running) return false;
-    if (s_last_attempt_ms && now_ms - s_last_attempt_ms < WX_BACKOFF_MS) return false;
+    if (!just_online && s_last_attempt_ms && now_ms - s_last_attempt_ms < WX_BACKOFF_MS) return false;
     s_last_attempt_ms = now_ms;
     s_task_running = true;
     s_fetch_ok = false;
