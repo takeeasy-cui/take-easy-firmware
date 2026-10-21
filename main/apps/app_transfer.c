@@ -1147,6 +1147,9 @@ static app_redraw_t stop_usb_for_navigation(app_ctx_t *ctx, bool home) {
         }
         s_any_changed = true;
     }
+    /* 22f（用户 2026-10-21）：离开 USB 页必须清 s_usb_entry，否则 render 仍画
+     * USB 页——右键返回/中长按画面纹丝不动，看起来就是按键失效。 */
+    s_usb_entry = false;
     if (home) ui_nav_request(ctx, 0);
     else if (s_direct_entry) ctx->request_return = true;
     else s_view = TRANSFER_METHODS;
@@ -1311,7 +1314,25 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
 }
 static app_redraw_t on_key_long(app_ctx_t *ctx, int key) {
     if (key != UI_KEY_2) return APP_REDRAW_NONE;
-    if (s_usb_entry || usb_storage_active()) return stop_usb_for_navigation(ctx, false);
+    if (s_usb_entry || usb_storage_active()) {
+        /* 22f（用户 2026-10-21）：21h 恒语义——中键长按=退出 app；USB 读卡先安全收尾。
+         * 旧实现“返回方式页”且 s_usb_entry 未清、画面不变，看起来按键失效。 */
+        s_usb_start_pending = false;
+        if (usb_storage_active()) {
+            esp_err_t err = usb_storage_stop();
+            if (err != ESP_OK) {
+                if (usb_storage_stop_mount_failed())
+                    snprintf(s_usb_message, sizeof(s_usb_message), "TF 卡重新挂载失败：%s，请重新插卡或重启后再试", esp_err_to_name(err));
+                else
+                    snprintf(s_usb_message, sizeof(s_usb_message), "USB 写入未完成：%s，请在电脑弹出后重试", esp_err_to_name(err));
+                return APP_REDRAW_PAGE;
+            }
+            s_any_changed = true;
+        }
+        s_usb_entry = false;
+        ctx->request_return = true;
+        return APP_REDRAW_NONE;
+    }
     ctx->request_return = true;
     return APP_REDRAW_NONE;
 }
