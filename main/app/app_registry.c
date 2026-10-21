@@ -17,15 +17,13 @@ extern const app_desc_t app_apps;
 extern const app_desc_t app_files;
 extern const app_desc_t app_calc;
 extern const app_desc_t app_device_settings;
-extern const app_desc_t app_avgr;
-extern const app_desc_t app_gtext;
-extern const app_desc_t app_gbbk;
 extern const app_desc_t app_notes;
 extern const app_desc_t app_pomodoro;
 extern const app_desc_t app_muyu;
 
 // 正式产品页面清单；工厂测试与历史示例不进入用户导航。
-// GameCore（2026-10-18）：游戏入口 = 推理/文字/步步高三薄壳，互斥插件内核驱动。
+// V1.0 定稿（用户 2026-10-21）：三游戏入口（推理/文字/步步高）已按用户要求移除；
+// 薄壳与 GameCore 源码保留在树中待后续版本恢复（索引 0-6 依赖保持不变）。
 static const app_desc_t* const s_apps[] = {
     &app_dashboard,
     &app_book,
@@ -34,9 +32,6 @@ static const app_desc_t* const s_apps[] = {
     &app_files,
     &app_calc,
     &app_image,
-    &app_avgr,
-    &app_gtext,
-    &app_gbbk,
     &app_notes,
     &app_pomodoro,
     &app_muyu,

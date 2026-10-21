@@ -8,8 +8,8 @@
  * 微信读书 tile 已删（微信传书入口在传输文件页）。
  *
  * Fixed 4x5 icon grid (up to 20 cells), RickyOS-style 112 px tiles with 56 px
- * line icons and centered labels. New apps precede the three games (user rule);
- * only real apps draw; empty cells stay blank.
+ * line icons and centered labels. The three game entries were removed for the
+ * V1.0 release (code kept in tree); only real apps draw; empty cells stay blank.
  */
 #include <math.h>
 #include <stdio.h>
@@ -39,15 +39,9 @@ typedef struct {
 
 static const app_desc_t* page_files(void) { return app_at(4); }
 static const app_desc_t* page_calc(void) { return app_at(5); }
-extern const app_desc_t app_avgr;
-extern const app_desc_t app_gtext;
-extern const app_desc_t app_gbbk;
 extern const app_desc_t app_notes;
 extern const app_desc_t app_pomodoro;
 extern const app_desc_t app_muyu;
-static const app_desc_t* page_avgr(void)   { return &app_avgr; }
-static const app_desc_t* page_gtext(void) { return &app_gtext; }
-static const app_desc_t* page_gbbk(void)  { return &app_gbbk; }
 static const app_desc_t* page_notes(void) { return &app_notes; }
 static const app_desc_t* page_pomodoro(void) { return &app_pomodoro; }
 static const app_desc_t* page_muyu(void) { return &app_muyu; }
@@ -94,37 +88,6 @@ static void icon_calc(uint8_t* fb, int cx, int cy, uint8_t ink) {
     ui_fill_round_rect(fb, (EpdRect){body.x + 5, body.y + 26, 7, 7}, 2, ink);
 }
 
-static void icon_avgr(uint8_t* fb, int cx, int cy, uint8_t ink) {
-    /* 法槌：斜置槌头 + 柄 + 垫块（推理游戏入口）。 */
-    ui_fill_round_rect(fb, (EpdRect){cx - 20, cy - 17, 26, 16}, 4, ink);
-    nothing_thick_line(fb, cx + 4, cy - 4, cx + 19, cy + 13, 7, ink);
-    nothing_thick_line(fb, cx - 16, cy + 16, cx + 14, cy + 16, 5, ink);
-}
-
-static void icon_gtext(uint8_t* fb, int cx, int cy, uint8_t ink) {
-    /* 对话气泡：圆角泡 + 尾巴 + 三点（文字游戏入口）。 */
-    nothing_thick_line(fb, cx - 18, cy - 14, cx + 18, cy - 14, 5, ink);
-    nothing_thick_line(fb, cx - 20, cy - 12, cx - 20, cy + 6, 5, ink);
-    nothing_thick_line(fb, cx + 20, cy - 12, cx + 20, cy + 6, 5, ink);
-    nothing_thick_line(fb, cx - 18, cy + 8, cx - 8, cy + 8, 5, ink);
-    nothing_thick_line(fb, cx + 18, cy + 8, cx + 8, cy + 8, 5, ink);
-    nothing_thick_line(fb, cx - 8, cy + 8, cx - 2, cy + 16, 5, ink);
-    epd_fill_circle(cx - 10, cy - 4, 3, ink, fb);
-    epd_fill_circle(cx, cy - 4, 3, ink, fb);
-    epd_fill_circle(cx + 10, cy - 4, 3, ink, fb);
-}
-
-static void icon_gbbk(uint8_t* fb, int cx, int cy, uint8_t ink) {
-    /* 游戏卡带：斜面卡体 + 缺角 + 读卡窗（步步高游戏入口）。 */
-    EpdRect body = {cx - 17, cy - 15, 34, 30};
-    ui_fill_round_rect(fb, body, 4, ink);
-    ui_fill_rect_fast((EpdRect){body.x + 2, body.y + 2, body.width - 4, 10}, 0xf0, fb);
-    ui_fill_rect_fast((EpdRect){body.x + 6, body.y + 5, body.width - 12, 18}, 0xf0, fb);
-    epd_fill_rect((EpdRect){body.x + 9, body.y + 6, body.width - 18, 4}, ink, fb);
-    epd_fill_rect((EpdRect){body.x + 9, body.y + 12, body.width - 18, 2}, ink, fb);
-    nothing_thick_line(fb, cx - 17, cy + 19, cx + 17, cy + 19, 5, ink);
-}
-
 static void icon_notes(uint8_t* fb, int cx, int cy, uint8_t ink) {
     /* 便签：圆角卡描边 + 两行内容线 + 右下铅笔斜置（新增/编辑语义）。 */
     EpdRect body = {cx - 17, cy - 20, 34, 40};
@@ -158,16 +121,13 @@ static void icon_muyu(uint8_t* fb, int cx, int cy, uint8_t ink) {
     epd_fill_circle(cx + 20, cy + 21, 6, ink, fb);
 }
 
-static const apps_entry_t k_entries[9] = {
+static const apps_entry_t k_entries[6] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
     {"计算器", icon_calc, page_calc, true},
     {"便签", icon_notes, page_notes, true},
     {"番茄时钟", icon_pomodoro, page_pomodoro, true},
     {"木鱼", icon_muyu, page_muyu, true},
-    {"推理游戏", icon_avgr, page_avgr, true},
-    {"文字游戏", icon_gtext, page_gtext, true},
-    {"步步高游戏", icon_gbbk, page_gbbk, true},
 };
 
 static EpdRect cell_rect(int index) {
