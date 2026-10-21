@@ -1659,11 +1659,17 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
             }
         }
     }
-    /* v2 天气（用户 2026-10-19）：30s 节流内顺带轮询（联网且缓存不覆盖今天才发起，
-     * 正常 3 天一次联网）；刷新完成→只刷右组条带（图标+地点+高低温）。 */
+    /* v5 天气（用户 2026-10-19）：30s 节流内顺带轮询（联网且缓存不覆盖今天才发起，
+     * 正常 3 天一次联网）；刷新完成→只刷右组条带（图标+地点+高低温）。
+     * 22i（用户 2026-10-21）：本地联网上升沿 → 后台强制抓取，保证连 WiFi 后 10s 内更新。 */
     {
         read_pico_transfer_status_t network = {0};
         read_pico_transfer_get_status(&network);
+        const bool net_now = network.network_ready;
+        static bool s_wx_net_prev;
+        const bool net_rising = net_now && !s_wx_net_prev;
+        s_wx_net_prev = net_now;
+        if (net_rising) weather_service_force_fetch();
         if (weather_service_tick(network.network_ready)) {
             render(ctx, ctx->fb);
             s_area = HOME_WX_AREA;

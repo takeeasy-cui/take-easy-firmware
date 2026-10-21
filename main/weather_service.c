@@ -482,6 +482,23 @@ bool weather_service_fetch_manual(void) {
     return ok;
 }
 
+/* 22i（用户 2026-10-21：连 WiFi 后首页天气 10s 内自动更新）：联网上升沿时
+ * 由首页 on_tick 调用——异步后台抓取，豁免缓存覆盖与失败退避，不阻塞 UI。 */
+bool weather_service_force_fetch(void) {
+    load_config();
+    if (!s_city_cfg[0] || !s_key[0]) return false;
+    if (s_task_running) return false;
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    s_last_attempt_ms = now_ms;
+    s_fetch_ok = false;
+    s_task_running = true;
+    if (xTaskCreate(fetch_task, "weather", 8192, NULL, 1, NULL) != pdPASS) {
+        s_task_running = false;
+        return false;
+    }
+    return true;
+}
+
 /* tick 判定"刚完成"：刷新任务结束（s_task_running 清零后）由下一次 tick 报告，
  * 主页据此局部重绘天气区。完成后一秒窗口内视为新。 */
 static bool refresh_just_done(int64_t now_ms) {

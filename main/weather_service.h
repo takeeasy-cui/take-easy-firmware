@@ -80,6 +80,9 @@ bool weather_service_fetch_sync(void);
 /// 天气设置页「手动更新」直调（22h）：同步抓取，豁免缓存覆盖与失败退避；
 /// 无配置或后台任务在跑时返回 false，调用方据此提示失败原因。
 bool weather_service_fetch_manual(void);
+/// 联网上升沿后台强制抓取（22i）：异步、不阻塞 UI，豁免缓存/退避；
+/// 用于首页「连 WiFi 后天气 10s 内自动更新」。返回 true = 已发起后台抓取。
+bool weather_service_force_fetch(void);
 
 #ifdef __cplusplus
 }
