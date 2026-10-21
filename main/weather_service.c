@@ -466,6 +466,22 @@ bool weather_service_fetch_sync(void) {
     return ok;
 }
 
+/* 22h（用户 2026-10-21）：天气设置页「手动更新」直调——同步抓取（阻塞至多 HTTP 12s，
+ * 由设置页两阶段调用：先推「正在更新…」画面，无输入时再进本函数）。
+ * 豁免 covered_today 与失败退避（手动点就是要强制刷新）；无配置或后台任务在跑时
+ * 返回 false。失败不清 s_days（保留旧缓存供首页显示），成功记 refresh_done 供 tick 上报。 */
+bool weather_service_fetch_manual(void) {
+    load_config();
+    if (!s_city_cfg[0] || !s_key[0]) return false;
+    if (s_task_running) return false;
+    int64_t now_ms = esp_timer_get_time() / 1000;
+    s_last_attempt_ms = now_ms;
+    s_fetch_ok = false;
+    bool ok = fetch_forecast();
+    if (ok) s_refresh_done_ms = now_ms;
+    return ok;
+}
+
 /* tick 判定"刚完成"：刷新任务结束（s_task_running 清零后）由下一次 tick 报告，
  * 主页据此局部重绘天气区。完成后一秒窗口内视为新。 */
 static bool refresh_just_done(int64_t now_ms) {

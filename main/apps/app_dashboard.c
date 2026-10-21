@@ -784,6 +784,7 @@ static int s_wx_edit = -1;      /* -1=未编辑；0=地点；1=Key；2=组件文
 static char s_wx_city[48];
 static char s_wx_key[40];
 static ui_text_edit_t s_wx_input;
+static bool s_wx_update_pending;   /* 22h：手动更新两阶段（点击→推「正在更新」→on_tick 同步抓取出结果）。 */
 static char s_wx_notice[96];
 static EpdRect s_wx_area;       /* 键盘局部刷新区 */
 static bool s_wx_layout, s_wx_settle;
@@ -820,7 +821,9 @@ static EpdRect goal_value_rect(void) { return (EpdRect){166, GOAL_SET_Y, 352, GO
 #define WX_ROW_X 36
 #define WX_ROW_W 612
 static EpdRect wx_row_rect(int idx) { return (EpdRect){WX_ROW_X, 170 + idx * 118, WX_ROW_W, 96}; }
-static EpdRect wx_reset_rect(void) { return (EpdRect){WX_ROW_X, 556, WX_ROW_W, 92}; }
+/* 22h（用户 2026-10-21）：底部双按钮——「手动更新」与「恢复默认源」并排。 */
+static EpdRect wx_update_rect(void) { return (EpdRect){WX_ROW_X, 556, 296, 92}; }
+static EpdRect wx_reset_rect(void) { return (EpdRect){WX_ROW_X + 316, 556, 296, 92}; }
 
 /* 0=星期日。Sakamoto 算法，无需 libc 时区。 */
 static int goal_weekday(int y, int m, int d) {
@@ -1244,6 +1247,7 @@ static void render_wx_setup(uint8_t *fb) {
                        : prov == WEATHER_PROVIDER_CAIYUN ? "点击切换 · 地点填经纬度如 116.41,39.9"
                                                        : "点击切换 · 地点填城市名";
     wx_row_card(fb, wx_row_rect(2), "数据源", prov_text, prov_hint, true);
+    ui_draw_button(fb, wx_update_rect(), "手动更新", false);
     ui_draw_button(fb, wx_reset_rect(), "恢复默认源", false);
     ui_text_vc(fb, 342, wx_reset_rect().y + wx_reset_rect().height + 30, 17,
                "清除设备设置，改用 TF 卡 weather.txt", EPD_DRAW_ALIGN_CENTER, false);
@@ -1373,6 +1377,12 @@ static app_redraw_t wx_setup_gesture(app_ctx_t *ctx, const ui_gesture_event_t *e
         snprintf(s_wx_notice, sizeof(s_wx_notice),
                  err == ESP_OK ? "已切换数据源，联网后按新源更新" : "切换失败，请重试");
         return APP_REDRAW_FULL;
+    }
+    if (ui_rect_hit(wx_update_rect(), ev->x0, ev->y0)) {
+        /* 22h（用户 2026-10-21）：手动更新——先推「正在更新」画面，on_tick 再同步抓取出结果。 */
+        s_wx_update_pending = true;
+        snprintf(s_wx_notice, sizeof(s_wx_notice), "正在更新天气…");
+        return APP_REDRAW_PAGE;
     }
     if (ui_rect_hit(wx_reset_rect(), ev->x0, ev->y0)) {
         esp_err_t err = weather_config_reset();
@@ -1567,6 +1577,18 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
         return r == UI_KEYBOARD_CHANGED ? wx_editor_paint(ctx, false) : APP_REDRAW_NONE;
     }
     if (ctx->consumed || (ctx->touch && ctx->touch->touched)) return APP_REDRAW_NONE;
+    /* 22h（用户 2026-10-21）：天气设置页「手动更新」第二阶段——上帧已推「正在更新…」，
+     * 无输入时同步抓取（至多 HTTP 12s），结果写 notice 后整页重绘。 */
+    if (s_wx_update_pending) {
+        s_wx_update_pending = false;
+        bool ok = weather_service_fetch_manual();
+        if (ok)
+            snprintf(s_wx_notice, sizeof(s_wx_notice), "已更新：%d° / %d°，回首页查看",
+                     weather_low(), weather_high());
+        else
+            snprintf(s_wx_notice, sizeof(s_wx_notice), "更新失败：检查网络、地点与 Key");
+        return APP_REDRAW_PAGE;
+    }
     /* 状态栏身份头像：解码完成后局部刷新状态栏（首帧/换头像后狐狸占位）。 */
     static bool s_avatar_wait;
     bool avatar_pending = nothing_statusbar_avatar_pending();

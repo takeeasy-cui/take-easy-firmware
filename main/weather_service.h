@@ -77,6 +77,9 @@ bool weather_service_tick(bool network_ready);
 /// 对时窗口直调（time_service）：缓存不覆盖今天才同窗口抓取（正常 3 天一次联网）。
 /// 主动对齐对时连接，不为天气单独起连接；返回 true = 实际抓取且成功。
 bool weather_service_fetch_sync(void);
+/// 天气设置页「手动更新」直调（22h）：同步抓取，豁免缓存覆盖与失败退避；
+/// 无配置或后台任务在跑时返回 false，调用方据此提示失败原因。
+bool weather_service_fetch_manual(void);
 
 #ifdef __cplusplus
 }
