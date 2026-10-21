@@ -233,6 +233,27 @@ static int skycon_to_code(const char *s) {
     return WEATHER_CODE_UNKNOWN;
 }
 
+/* 22l：URL 百分号编码（UTF-8 原样转义非安全字符）。http_parser 拒绝 URL 中
+ * 的非 ASCII 字符，中文城市名必须编码后拼入（此前直接拼中文导致
+ * esp_http_client_init 返回 NULL，设备报「HTTP初始化失败」）。 */
+static void url_encode(const char *src, char *dst, size_t dst_cap) {
+    static const char hex[] = "0123456789ABCDEF";
+    size_t o = 0;
+    if (!src || !dst || dst_cap == 0) { if (dst && dst_cap) dst[0] = 0; return; }
+    for (const unsigned char *p = (const unsigned char *)src; *p && o + 3 < dst_cap; ++p) {
+        unsigned char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            dst[o++] = (char)c;
+        } else {
+            dst[o++] = '%';
+            dst[o++] = hex[c >> 4];
+            dst[o++] = hex[c & 0x0F];
+        }
+    }
+    dst[o] = 0;
+}
+
 /* 22k：把 HTTP 详细码转成失败原因短文本（手动更新页显示）。 */
 static void record_http_err(int code) {
     if (code == -2)
@@ -346,9 +367,11 @@ static bool parse_seniverse(const char *body) {
 /* 和风 GeoAPI：城市名 → 地点 ID（写入 s_qh_id/s_qh_city，随配置失效清零）。 */
 static bool qh_lookup_id(void) {
     if (s_qh_id[0]) return true;
+    char enc[160];
+    url_encode(s_city_cfg, enc, sizeof(enc));
     char url[256];
     snprintf(url, sizeof(url), "https://" QH_GEO_HOST QH_GEO_PATH "?location=%s&key=%s",
-             s_city_cfg, s_key);
+             enc, s_key);
     char *body = NULL;
     size_t body_len = 0;
     bool ok = http_get_body(url, &body, &body_len) == 200;
@@ -470,12 +493,15 @@ static bool fetch_forecast(void) {
         code = http_get_body(url, &body, &body_len);
         if (code == 200) ok = parse_caiyun(body); else record_http_err(code);
         break;
-    default:
+    default: {
+        char enc[160];
+        url_encode(s_city_cfg, enc, sizeof(enc));
         snprintf(url, sizeof(url), "https://" WX_HOST WX_PATH "&location=%s&key=%s",
-                 s_city_cfg, s_key);
+                 enc, s_key);
         code = http_get_body(url, &body, &body_len);
         if (code == 200) ok = parse_seniverse(body); else record_http_err(code);
         break;
+    }
     }
     free(body);
     if (!ok && code == 200 && !s_last_err_text[0])
