@@ -63,6 +63,7 @@ static int64_t s_last_attempt_ms;
 static int64_t s_refresh_done_ms;   /* 完成时刻，tick 判定"刚完成" */
 static bool s_net_was_ready;   /* 22g：上次 tick 联网态，检测联网上升沿（每次联网强制拉取）。 */
 static bool s_fetch_ok;
+static char s_last_err_text[72];  /* 22k：最近一次抓取失败原因（手动更新页显示）。 */
 
 /* NVS 配置（设置页写入；优先于 TF 卡 weather.txt，用户 2026-10-19）。
  * 任一字段有值即视为记录存在；返回 true = 读到了至少一个字段。 */
@@ -232,40 +233,59 @@ static int skycon_to_code(const char *s) {
     return WEATHER_CODE_UNKNOWN;
 }
 
-/* 通用 HTTPS GET：≤64 KiB 整体读回，返回 malloc 的 body（调用方 free）。 */
-static bool http_get_body(const char *url, char **out, size_t *out_len) {
+/* 22k：把 HTTP 详细码转成失败原因短文本（手动更新页显示）。 */
+static void record_http_err(int code) {
+    if (code == -2)
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "联网失败，查WiFi与时间");
+    else if (code == -1)
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "HTTP初始化失败");
+    else if (code > 0)
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "HTTP %d", code);
+    else
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "响应异常");
+}
+
+/* 通用 HTTPS GET：≤64 KiB 整体读回，返回 malloc 的 body（调用方 free）。
+ * 返回 200 = 成功；-1 = 初始化失败；-2 = 连接失败（DNS/TCP/TLS/超时，
+ * 常见原因 WiFi 未连或系统时间未对导致证书校验不过）；-3/-4 = 响应异常；
+ * 其余正数 = HTTP 状态码（如 403 Key 或城市无权限）。 */
+static int http_get_body(const char *url, char **out, size_t *out_len) {
     *out = NULL;
     *out_len = 0;
     esp_http_client_config_t config = { .url = url, .crt_bundle_attach = esp_crt_bundle_attach, .timeout_ms = 12000 };
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    bool ok = false;
-    if (client) {
-        if (esp_http_client_open(client, 0) == ESP_OK) {
-            int read = esp_http_client_fetch_headers(client);
-            int64_t total = esp_http_client_get_content_length(client);
-            if (read >= 0 && total > 0 && total < 65536) {
-                char *body = malloc((size_t)total + 1);
-                if (body) {
-                    size_t len = 0;
-                    while (len < (size_t)total) {
-                        int n = esp_http_client_read(client, body + len, (int)((size_t)total - len));
-                        if (n <= 0) break;
-                        len += (size_t)n;
-                    }
-                    body[len] = 0;
-                    if (esp_http_client_get_status_code(client) == 200 && len == (size_t)total) {
-                        *out = body;
-                        *out_len = len;
-                        ok = true;
-                    } else {
-                        free(body);
-                    }
+    if (!client) return -1;
+    int result = -2;
+    if (esp_http_client_open(client, 0) == ESP_OK) {
+        result = -3;
+        int read = esp_http_client_fetch_headers(client);
+        int64_t total = esp_http_client_get_content_length(client);
+        int status = esp_http_client_get_status_code(client);
+        if (read >= 0 && total > 0 && total < 65536) {
+            char *body = malloc((size_t)total + 1);
+            if (body) {
+                size_t len = 0;
+                while (len < (size_t)total) {
+                    int n = esp_http_client_read(client, body + len, (int)((size_t)total - len));
+                    if (n <= 0) break;
+                    len += (size_t)n;
                 }
+                body[len] = 0;
+                if (status == 200 && len == (size_t)total) {
+                    *out = body;
+                    *out_len = len;
+                    esp_http_client_cleanup(client);
+                    return 200;
+                }
+                result = status > 0 ? status : -4;
+                free(body);
             }
+        } else if (status > 0) {
+            result = status;
         }
-        esp_http_client_cleanup(client);
     }
-    return ok;
+    esp_http_client_cleanup(client);
+    return result;
 }
 
 /* 解析结果写回 s_days/s_city 的公共出口：每天 code/high/low/date + 城市名。 */
@@ -282,6 +302,7 @@ static bool days_commit(int count, const int *codes, const int *highs, const int
     if (city_name && city_name[0])
         snprintf(s_city, sizeof(s_city), "%s", city_name);
     s_fetch_ok = true;
+    s_last_err_text[0] = 0;             /* 22k：成功清除失败原因。 */
     cache_save();
     return true;
 }
@@ -330,7 +351,7 @@ static bool qh_lookup_id(void) {
              s_city_cfg, s_key);
     char *body = NULL;
     size_t body_len = 0;
-    bool ok = http_get_body(url, &body, &body_len);
+    bool ok = http_get_body(url, &body, &body_len) == 200;
     if (ok) {
         cJSON *root = cJSON_Parse(body);
         if (root) {
@@ -431,26 +452,35 @@ static bool fetch_forecast(void) {
     char *body = NULL;
     size_t body_len = 0;
     bool ok = false;
+    int code = 0;
     switch (s_provider) {
     case WEATHER_PROVIDER_QWEATHER:
-        if (!qh_lookup_id()) return false;
+        if (!qh_lookup_id()) {
+            snprintf(s_last_err_text, sizeof(s_last_err_text), "地点ID查询失败");
+            return false;
+        }
         snprintf(url, sizeof(url), "https://" QH_DEV_HOST QH_DEV_PATH "?location=%s&key=%s",
                  s_qh_id, s_key);
-        if (http_get_body(url, &body, &body_len)) ok = parse_qweather(body);
+        code = http_get_body(url, &body, &body_len);
+        if (code == 200) ok = parse_qweather(body); else record_http_err(code);
         break;
     case WEATHER_PROVIDER_CAIYUN:
         snprintf(url, sizeof(url), "https://" CY_HOST "/v2.6/%s/%s/daily?dailysteps=3",
                  s_key, s_city_cfg);
-        if (http_get_body(url, &body, &body_len)) ok = parse_caiyun(body);
+        code = http_get_body(url, &body, &body_len);
+        if (code == 200) ok = parse_caiyun(body); else record_http_err(code);
         break;
     default:
         snprintf(url, sizeof(url), "https://" WX_HOST WX_PATH "&location=%s&key=%s",
                  s_city_cfg, s_key);
-        if (http_get_body(url, &body, &body_len)) ok = parse_seniverse(body);
+        code = http_get_body(url, &body, &body_len);
+        if (code == 200) ok = parse_seniverse(body); else record_http_err(code);
         break;
     }
     free(body);
-    if (!ok) ESP_LOGW(TAG, "forecast fetch failed (provider=%d)", (int)s_provider);
+    if (!ok && code == 200 && !s_last_err_text[0])
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "数据解析失败");
+    if (!ok) ESP_LOGW(TAG, "forecast fetch failed (provider=%d code=%d)", (int)s_provider, code);
     return ok;
 }
 
@@ -487,8 +517,14 @@ bool weather_service_fetch_sync(void) {
  * 返回 false。失败不清 s_days（保留旧缓存供首页显示），成功记 refresh_done 供 tick 上报。 */
 bool weather_service_fetch_manual(void) {
     load_config();
-    if (!s_city_cfg[0] || !s_key[0]) return false;
-    if (s_task_running) return false;
+    if (!s_city_cfg[0] || !s_key[0]) {
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "未配置地点或Key");
+        return false;
+    }
+    if (s_task_running) {
+        snprintf(s_last_err_text, sizeof(s_last_err_text), "后台刷新中，稍后再试");
+        return false;
+    }
     int64_t now_ms = esp_timer_get_time() / 1000;
     s_last_attempt_ms = now_ms;
     s_fetch_ok = false;
@@ -536,6 +572,10 @@ static void weather_invalidate(void) {
     s_last_attempt_ms = 0;
     s_fetch_ok = false;
     s_refresh_done_ms = 0;
+}
+
+const char *weather_service_last_error(void) {
+    return s_last_err_text;
 }
 
 weather_provider_t weather_config_provider(void) {

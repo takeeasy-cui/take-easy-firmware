@@ -84,6 +84,8 @@ bool weather_service_fetch_manual(void);
 /// 联网上升沿后台强制抓取（22i）：异步、不阻塞 UI，豁免缓存/退避；
 /// 用于首页「连 WiFi 后天气 10s 内自动更新」。返回 true = 已发起后台抓取。
 bool weather_service_force_fetch(void);
+/// 最近一次抓取失败的原因短文本（22k，空串 = 无失败）；手动更新失败时展示。
+const char *weather_service_last_error(void);
 
 #ifdef __cplusplus
 }

@@ -1582,11 +1582,16 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
     if (s_wx_update_pending) {
         s_wx_update_pending = false;
         bool ok = weather_service_fetch_manual();
-        if (ok)
+        if (ok) {
             snprintf(s_wx_notice, sizeof(s_wx_notice), "已更新：%d° / %d°，回首页查看",
                      weather_low(), weather_high());
-        else
-            snprintf(s_wx_notice, sizeof(s_wx_notice), "更新失败：检查网络、地点与 Key");
+        } else {
+            const char *why = weather_service_last_error();
+            if (why && why[0])
+                snprintf(s_wx_notice, sizeof(s_wx_notice), "更新失败：%s", why);
+            else
+                snprintf(s_wx_notice, sizeof(s_wx_notice), "更新失败：检查网络、地点与 Key");
+        }
         return APP_REDRAW_PAGE;
     }
     /* 状态栏身份头像：解码完成后局部刷新状态栏（首帧/换头像后狐狸占位）。 */
