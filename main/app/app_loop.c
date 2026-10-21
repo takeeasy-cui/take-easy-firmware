@@ -75,6 +75,10 @@
 #include "ui_click_feedback.h"
 #include "usb_storage.h"
 #include "local_latency_probe.h"
+/* ==== 临时（2026-10-21 真机截图用）：截完删除这三行 include ==== */
+#include <stdio.h>
+#include <sys/stat.h>
+#include "read_pico_buzzer.h"
 
 #define TAG "app_loop"
 
@@ -88,6 +92,85 @@
 
 static int64_t s_lock_ignore_until_ms;
 extern const app_desc_t app_transfer;
+
+/* =========================================================================
+ * 临时（2026-10-21）：电源键短按 = 把当前 framebuffer 存 TF 卡 BMP。
+ * 用途：本次真机截图（网页展示）。截图完毕删除本段函数、上面的 include
+ * 与短按条件里的调用，即恢复原短按锁屏行为。
+ * ========================================================================= */
+typedef struct __attribute__((packed)) {
+    uint16_t bfType;
+    uint32_t bfSize;
+    uint16_t bfReserved1, bfReserved2;
+    uint32_t bfOffBits;
+} shot_bmp_fh_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t biSize;
+    int32_t biWidth, biHeight;
+    uint16_t biPlanes, biBitCount;
+    uint32_t biCompression, biSizeImage;
+    int32_t biXPelsPerMeter, biYPelsPerMeter;
+    uint32_t biClrUsed, biClrImportant;
+} shot_bmp_ih_t;
+
+/* 保存当前画面为 8bpp 灰度 BMP；返回 true 表示已消费短按（不执行原锁屏）。 */
+static bool power_short_screenshot(app_ctx_t *ctx) {
+    uint8_t *fb = epd_hl_get_framebuffer(ctx->hl);
+    const int W = epd_width();
+    const int H = epd_height();
+    bool ok = false;
+    if (fb != NULL && W > 0 && H > 0) {
+        mkdir("/sdcard/screenshots", 0775);
+        char path[80];
+        int n = 1;
+        for (; n < 999; ++n) {
+            snprintf(path, sizeof(path), "/sdcard/screenshots/shot_%03d.bmp", n);
+            FILE *probe = fopen(path, "rb");
+            if (probe == NULL) break;
+            fclose(probe);
+        }
+        FILE *f = fopen(path, "wb");
+        if (f != NULL) {
+            const int pad = (4 - (W % 4)) % 4;
+            const uint32_t offbits = 14u + 40u + 256u * 4u;
+            const uint32_t rowb = (uint32_t)(W + pad);
+            shot_bmp_fh_t fh = {
+                .bfType = 0x4D42, .bfSize = offbits + rowb * (uint32_t)H,
+                .bfReserved1 = 0, .bfReserved2 = 0, .bfOffBits = offbits,
+            };
+            shot_bmp_ih_t ih = {
+                .biSize = 40, .biWidth = W, .biHeight = H,
+                .biPlanes = 1, .biBitCount = 8,
+                .biCompression = 0, .biSizeImage = rowb * (uint32_t)H,
+                .biXPelsPerMeter = 0, .biYPelsPerMeter = 0,
+                .biClrUsed = 256, .biClrImportant = 256,
+            };
+            fwrite(&fh, 1, sizeof(fh), f);
+            fwrite(&ih, 1, sizeof(ih), f);
+            for (int i = 0; i < 256; ++i) {
+                uint8_t e[4] = { (uint8_t)i, (uint8_t)i, (uint8_t)i, 0 };
+                fwrite(e, 1, 4, f);
+            }
+            const uint8_t padb[3] = {0, 0, 0};
+            for (int y = H - 1; y >= 0; --y) {
+                const uint8_t *row = fb + (size_t)y * (size_t)(W / 2);
+                for (int x = 0; x < W; ++x) {
+                    uint8_t b = row[x >> 1];
+                    uint8_t nib = (x & 1) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0F);
+                    fputc((int)(nib * 17), f);
+                }
+                if (pad) fwrite(padb, 1, (size_t)pad, f);
+            }
+            fclose(f);
+            ok = true;
+        }
+    }
+    read_pico_buzzer_tone(ok ? 1200u : 350u, ok ? 80u : 200u);
+    ESP_LOGI("shot", "screenshot %s", ok ? "saved" : "failed");
+    return true;
+}
+/* ==== 临时结束 ==== */
 
 static const app_desc_t* s_presented_main;
 static ui_quick_menu_t s_quick;
@@ -850,7 +933,7 @@ void app_loop_run(const app_loop_config_t* config) {
                             app_present(&ctx, current, APP_REDRAW_FULL);
                         }
                     }
-                } else if (!power_dialog_open) {
+                } else if (!power_dialog_open && !power_short_screenshot(&ctx)) {
                     held_key = -1;
                     cancel_gesture(&ctx, current, &gesture);
                     if (menu_pressed >= 0) menu_feedback(&ctx, current, menu_leaf, menu_pressed, false, &feedback);
