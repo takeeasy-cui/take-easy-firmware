@@ -295,7 +295,7 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
     epd_fill_rect((EpdRect){0, 0, 684, NX_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
     if (s_editing) render_editor(fb);
-    else { render_list(fb); ui_nav_draw(fb, 0); }
+    else render_list(fb);   /* 用户 2026-10-21：去掉列表页多余的导航栏 */
 }
 
 static bool present(app_ctx_t *ctx, app_redraw_t redraw) {

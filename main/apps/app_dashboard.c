@@ -1806,7 +1806,9 @@ static void home_on_exit(app_ctx_t* ctx) {
     app_settings_muyu_flush();    /* 21g：首页 widget 敲击计数退出时统一落盘 */
 }
 
-static bool home_main_visible(app_ctx_t *ctx) { (void)ctx; return true; }
+/* 天气/组件文字编辑（键盘占用屏幕底部）时不视为主页态：否则主循环的导航带命中
+ * （y≥NX_NAV_TOP 的隐形四栏）会把键盘下部功能行的点击抢走（键盘收不到→点“123”不切数字）。 */
+static bool home_main_visible(app_ctx_t *ctx) { (void)ctx; return s_wx_edit < 0; }
 static EpdRect area_hint(app_ctx_t *ctx) { (void)ctx; return s_area; }
 
 const app_desc_t app_dashboard = {
