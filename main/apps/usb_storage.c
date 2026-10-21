@@ -30,6 +30,9 @@ static usb_phy_handle_t s_serial_phy;
 static bool s_host_ready, s_usb_ready, s_msc_ready;
 static bool s_active;
 static bool s_cleanup_pending;
+static bool s_stop_mount_failed;   /* 22e：上次 stop 失败是否卡在 TF 重新挂载阶段。 */
+
+bool usb_storage_stop_mount_failed(void) { return s_stop_mount_failed; }
 
 // MSC 用完内部 PHY 后，把它交还给串口/JTAG，电脑才能再次自动刷写。
 // Return the shared internal PHY to Serial/JTAG after MSC so flashing can reconnect.
@@ -89,7 +92,13 @@ static esp_err_t restore_local(void) {
 esp_err_t usb_storage_start(void) {
     book_lock_collage_invalidate();
     if (!(book_cover_jobs_quiesce(2000) && ui_avatar_quiesce(2000))) return ESP_ERR_NOT_FINISHED;
-    if (s_cleanup_pending) return ESP_ERR_INVALID_STATE;
+    /* 22e（用户 2026-10-21“USB 读卡打不开”）：上次“结束读卡”没收尾干净（电脑
+     * 未先弹出磁盘、写回调未完）时，cleanup_pending 会把后续 start 全部顶死在
+     * INVALID_STATE 且读卡页不再自动重试——先补一次收尾，成功后再正常启动。 */
+    if (s_cleanup_pending) {
+        esp_err_t fin = usb_storage_stop();
+        if (fin != ESP_OK) return fin;
+    }
     if (s_active) return ESP_OK;
     read_pico_sd_info_t info = {0};
     if (read_pico_sd_get_info(&info) != ESP_OK || !info.mounted) return ESP_ERR_INVALID_STATE;
@@ -147,6 +156,7 @@ fail:
 }
 
 esp_err_t usb_storage_stop(void) {
+    s_stop_mount_failed = false;
     if (!s_active && !s_storage && !s_usb_ready && !s_msc_ready && !s_host_ready) {
         restore_serial_phy();
         return ESP_OK;
@@ -154,12 +164,13 @@ esp_err_t usb_storage_stop(void) {
     s_cleanup_pending = true;
     // 先断开电脑并等待同步写回调结束，再释放 USB 存储对象。
     // Disconnect and let the synchronous write callback finish before freeing USB storage.
+    /* 22e：Windows 清理句柄常超 150ms（拷贝刚结束就点“结束读卡”尤其明显），拉宽窗口。 */
     if (s_usb_ready) {
         tud_disconnect();
-        vTaskDelay(pdMS_TO_TICKS(150));
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
     esp_err_t err = ESP_OK;
-    for (int attempt = 0; s_storage && attempt < 20; ++attempt) {
+    for (int attempt = 0; s_storage && attempt < 40; ++attempt) {   /* 22e：重试窗口 1s→2s */
         err = tinyusb_msc_delete_storage(s_storage);
         if (err == ESP_OK) { s_storage = NULL; break; }
         if (err != ESP_ERR_INVALID_STATE) goto cleanup;
@@ -190,5 +201,7 @@ cleanup:
     s_active = false;
     s_cleanup_pending = false;
     /* 重挂载失败如实上报：读卡页据实提示，不再假装“已重新挂载”。 */
-    return restore_local();
+    esp_err_t mount = restore_local();
+    s_stop_mount_failed = mount != ESP_OK;
+    return mount;
 }

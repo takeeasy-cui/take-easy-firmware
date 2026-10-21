@@ -1139,7 +1139,10 @@ static app_redraw_t stop_usb_for_navigation(app_ctx_t *ctx, bool home) {
     if (usb_storage_active()) {
         esp_err_t err = usb_storage_stop();
         if (err != ESP_OK) {
-            snprintf(s_usb_message, sizeof(s_usb_message), "USB 写入未完成：%s，请在电脑弹出后重试", esp_err_to_name(err));
+            if (usb_storage_stop_mount_failed())
+                snprintf(s_usb_message, sizeof(s_usb_message), "TF 卡重新挂载失败：%s，请重新插卡或重启后再试", esp_err_to_name(err));
+            else
+                snprintf(s_usb_message, sizeof(s_usb_message), "USB 写入未完成：%s，请在电脑弹出后重试", esp_err_to_name(err));
             return APP_REDRAW_PAGE;
         }
         s_any_changed = true;
@@ -1246,7 +1249,10 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
             if (usb_storage_active()) {
                 esp_err_t err = usb_storage_stop();
                 if (err != ESP_OK) {
-                    snprintf(s_usb_message, sizeof(s_usb_message), "USB 写入未完成：%s，请在电脑弹出后重试", esp_err_to_name(err));
+                    if (usb_storage_stop_mount_failed())
+                        snprintf(s_usb_message, sizeof(s_usb_message), "TF 卡重新挂载失败：%s，请重新插卡或重启后再试", esp_err_to_name(err));
+                    else
+                        snprintf(s_usb_message, sizeof(s_usb_message), "USB 写入未完成：%s，请在电脑弹出后重试", esp_err_to_name(err));
                     return APP_REDRAW_PAGE;
                 }
                 s_any_changed = true;
