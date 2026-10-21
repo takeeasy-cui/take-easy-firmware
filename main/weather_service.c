@@ -28,6 +28,12 @@ static const char *TAG = "weather";
 #define WX_CACHE_NVS "wx_cache"
 #define WX_CFG_NVS "wx_cfg"
 #define WX_BACKOFF_MS (10u * 60u * 1000u)
+/* 22j（用户 2026-10-21 拍板硬编码）：固件内置默认天气配置。
+ * 心知免费版仅开放少数大城市（用户所在地涿州无数据权限，AP010006），
+ * 内置城市取北京（毗邻涿州、同气候区，数据基本一致）。私钥随开源固件
+ * 公开，用户已知情并接受额度共用风险。 */
+#define WX_DEFAULT_CITY "北京"
+#define WX_DEFAULT_KEY   "S699wB33oSuVKkAqi"
 /* 和风：GeoAPI 查地点 ID → devapi 三天预报。 */
 #define QH_GEO_HOST "geoapi.qweather.com"
 #define QH_GEO_PATH "/v2/city/lookup"
@@ -89,6 +95,15 @@ static int text_to_code(const char *text) {
     return WEATHER_CODE_UNKNOWN;
 }
 
+/* 22j：应用固件内置默认（NVS 与 TF weather.txt 均未命中时兑底）。 */
+static void apply_builtin_default(void) {
+    snprintf(s_city_cfg, sizeof(s_city_cfg), "%s", WX_DEFAULT_CITY);
+    snprintf(s_key, sizeof(s_key), "%s", WX_DEFAULT_KEY);
+    s_provider = WEATHER_PROVIDER_SENIVERSE;
+    s_src = WEATHER_SRC_BUILTIN;
+    ESP_LOGI(TAG, "cfg(builtin) city=%s key=%u chars", s_city_cfg, (unsigned)strlen(s_key));
+}
+
 static void load_config(void) {
     if (s_cfg_loaded) return;
     /* NVS 优先（设置页写入，用户 2026-10-19）；未命中再回退 TF 卡 weather.txt。 */
@@ -105,9 +120,9 @@ static void load_config(void) {
     if (read_pico_sd_get_info(&sd) == ESP_ERR_NOT_FINISHED) return;  /* 卡未就绪，稍后重试 */
     s_cfg_loaded = true;
     s_src = WEATHER_SRC_NONE;
-    if (!sd.present || !sd.mounted) return;
+    if (!sd.present || !sd.mounted) { apply_builtin_default(); return; }  /* 22j：无 TF 用内置默认 */
     FILE *f = fopen("/sdcard/weather.txt", "r");
-    if (!f) return;
+    if (!f) { apply_builtin_default(); return; }  /* 22j：无 weather.txt 用内置默认 */
     char line[128];
     bool got = false;
     while (fgets(line, sizeof(line), f)) {

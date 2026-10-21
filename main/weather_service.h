@@ -35,7 +35,8 @@ typedef enum {
 typedef enum {
     WEATHER_SRC_NONE = 0,      /* 未配置 / no config */
     WEATHER_SRC_NVS,           /* 设备设置（NVS，优先） / on-device settings */
-    WEATHER_SRC_TF,            /* TF 卡 weather.txt（默认源） / default source */
+    WEATHER_SRC_TF,            /* TF 卡 weather.txt / TF-card file */
+    WEATHER_SRC_BUILTIN,       /* 固件内置默认（22j 兜底） / built-in default */
 } weather_config_source_t;
 
 /* 数据服务商（用户 2026-10-20 第二十一批 e 段，三源可选）：
