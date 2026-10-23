@@ -6,6 +6,9 @@
   命令词表 · 引号配对 · 标签引用存在 · 证据 id 先声明后引用 ·
   容量上限（命令/标签/证据/证言条数/标记/文本长度）· press/clash 语句序号合法。
 退出码 0=通过；每文件打印 PASS/FAIL 与问题行号。
+
+2026-10-23：CAP 与引擎宏同步（CMDS 4096/LABELS 256/EV 24/FLAGS 32）；
+case 声明允许多条（引擎语义：后声明覆盖，最终标题取最后一条）。
 """
 
 import re
@@ -15,7 +18,7 @@ from pathlib import Path
 CMDS_WORD = {"case", "label", "jump", "ifset", "ifclear", "flag", "bg",
              "char", "char_off", "say", "think", "gain_ev", "ev",
              "testimony", "stmt", "press", "clash", "ask_ev", "end"}
-CAP = {"cmd": 1024, "label": 96, "ev": 16, "stmt": 12, "flag": 24, "text": 640}
+CAP = {"cmd": 4096, "label": 256, "ev": 24, "stmt": 12, "flag": 32, "text": 640}
 
 def strip_comment(line: str) -> str:
     i = line.find("//")
@@ -39,8 +42,7 @@ def check(path: Path) -> int:
         cmd_count += 1
         rest = l[len(head):].strip()
         if head == "case":
-            if case_seen:
-                problems.append(f"{ln}: 重复 case")
+            # 引擎允许多条 case：后声明覆盖，最终标题取最后一条（两章合并包靠此机制）
             case_seen = True
         elif head == "label":
             labels.add(rest)

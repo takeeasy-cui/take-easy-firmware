@@ -266,6 +266,28 @@ static void ops_title(void* ctx, const char* t, bool has_save) {
 }
 
 /* ===================== paint（六类界面，冻结版观感） ===================== */
+/* 资产路径多级回退（2026-10-23）：剧本只写文件名（如 bg_court.png），
+ * 实际包结构五花八门（平铺 / images/ / images/bg|char/）。逐候选探测，
+ * .g8 伴生优先后 .png；全部未命中时回退到旧拼接路径（保持缺图提示行为）。 */
+static bool avgr_asset_path(const avgr_state_t* s, const char* name, char* out, size_t cap) {
+    static const char* const k_sub[] = { "", "images", "images/bg", "images/char", "bg", "char" };
+    for (unsigned i = 0; i < sizeof(k_sub) / sizeof(k_sub[0]); ++i) {
+        if (k_sub[i][0]) snprintf(out, cap, "%s/%s/%.190s", s->core.asset_dir, k_sub[i], name);
+        else snprintf(out, cap, "%s/%.190s", s->core.asset_dir, name);
+        char* ext = strrchr(out, '.');
+        if (ext && !strcmp(ext, ".png")) {          /* .g8 伴生变体优先 */
+            memcpy(ext, ".g8", 4);
+            FILE* p = fopen(out, "rb");
+            if (p) { fclose(p); return true; }
+            memcpy(ext, ".png", 5);
+        }
+        FILE* p = fopen(out, "rb");
+        if (p) { fclose(p); return true; }
+    }
+    snprintf(out, cap, "%s/%.190s", s->core.asset_dir, name);
+    return false;
+}
+
 static void paint_scene(uint8_t* fb, avgr_state_t* s) {
     /* 悬空指针根治（2026-10-18 真机"出示证据后立绘全糊"）：证物簿开箱
      * 加载 4 张 ev 图会把 8 槽 LRU 挤爆——旧立绘 slot 被 free，而快照
@@ -277,15 +299,7 @@ static void paint_scene(uint8_t* fb, avgr_state_t* s) {
     const uint8_t* bg = NULL;
     unsigned bw = 0, bh = 0;
     if (s->core.bg_file[0]) {
-        snprintf(full, sizeof(full), "%s/%.190s", s->core.asset_dir, s->core.bg_file);
-        /* g8 变体探测与解码器同规则（.png 引用 → 伴生 .g8）。 */
-        char* ext = strrchr(full, '.');
-        if (ext && !strcmp(ext, ".png")) {
-            memcpy(ext, ".g8", 4);
-            FILE* probe = fopen(full, "rb");
-            if (!probe) memcpy(ext, ".png", 5);
-            else fclose(probe);
-        }
+        avgr_asset_path(s, s->core.bg_file, full, sizeof(full));
         bg = avg_assets_get(&s->assets, full, 684, 830, &bw, &bh, s->core.now_ms, NULL);
     }
     if (bg) gc_ui_blit_gray_a(fb, bg, bw, bh, NULL, 0, 0, 1216, AVGR_DIALOG_TOP);
@@ -296,14 +310,7 @@ static void paint_scene(uint8_t* fb, avgr_state_t* s) {
     static const int k_w[3] = {368, 368, 368};
     for (int i = 0; i < 3; ++i) {
         if (!s->core.char_files[i][0]) continue;
-        snprintf(full, sizeof(full), "%s/%.190s", s->core.asset_dir, s->core.char_files[i]);
-        char* ext = strrchr(full, '.');
-        if (ext && !strcmp(ext, ".png")) {
-            memcpy(ext, ".g8", 4);
-            FILE* probe = fopen(full, "rb");
-            if (!probe) memcpy(ext, ".png", 5);
-            else fclose(probe);
-        }
+        avgr_asset_path(s, s->core.char_files[i], full, sizeof(full));
         unsigned cw = 0, ch_h = 0;
         const uint8_t* cmask = NULL;
         const uint8_t* cg = avg_assets_get(&s->assets, full, 470, 640, &cw, &ch_h,

@@ -21,9 +21,9 @@ extern "C" {
 
 /* ===================== 容量上限（单案件内存模型） ===================== */
 #define AVG_MAX_TEXT      640      /* 单条对话/证言文本字节 */
-#define AVG_MAX_CMDS      3072     /* 单案件命令数（实量分配，此为守卫上限） */
-#define AVG_MAX_LABELS    192      /* 标签（跳转目标）数 */
-#define AVG_MAX_EVIDENCE  16       /* 案件定义证据数 */
+#define AVG_MAX_CMDS      4096     /* 单案件命令数（PSRAM 动态分配+实量收缩，此为守卫上限；4096=逆转裁判两章合并包实需 3704+余量） */
+#define AVG_MAX_LABELS    256      /* 标签（跳转目标）数（两章合并实需 240） */
+#define AVG_MAX_EVIDENCE  24       /* 案件定义证据数（两章合并实需 20；证物簿 UI 按行数动态分页无写死） */
 #define AVG_MAX_STMTS     12       /* 单段证言条目数 */
 #define AVG_MAX_FLAGS     32       /* 剧情标记数 */
 #define AVG_SAVE_BYTES    2048     /* 存档行缓冲 */

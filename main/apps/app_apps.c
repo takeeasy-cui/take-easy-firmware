@@ -8,8 +8,9 @@
  * 微信读书 tile 已删（微信传书入口在传输文件页）。
  *
  * Fixed 4x5 icon grid (up to 20 cells), RickyOS-style 112 px tiles with 56 px
- * line icons and centered labels. The three game entries were removed for the
- * V1.0 release (code kept in tree); only real apps draw; empty cells stay blank.
+ * line icons and centered labels. New apps precede the games (user rule);
+ * only real apps draw; empty cells stay blank. V1.0.3 恢复推理游戏入口
+ * （GameCore + avgr 插件一直在编译，TF 卡包 /sdcard/games/avgr-*.zip）。
  */
 #include <math.h>
 #include <stdio.h>
@@ -39,9 +40,11 @@ typedef struct {
 
 static const app_desc_t* page_files(void) { return app_at(4); }
 static const app_desc_t* page_calc(void) { return app_at(5); }
+extern const app_desc_t app_avgr;
 extern const app_desc_t app_notes;
 extern const app_desc_t app_pomodoro;
 extern const app_desc_t app_muyu;
+static const app_desc_t* page_avgr(void)   { return &app_avgr; }
 static const app_desc_t* page_notes(void) { return &app_notes; }
 static const app_desc_t* page_pomodoro(void) { return &app_pomodoro; }
 static const app_desc_t* page_muyu(void) { return &app_muyu; }
@@ -88,6 +91,13 @@ static void icon_calc(uint8_t* fb, int cx, int cy, uint8_t ink) {
     ui_fill_round_rect(fb, (EpdRect){body.x + 5, body.y + 26, 7, 7}, 2, ink);
 }
 
+static void icon_avgr(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 法槌：斜置槌头 + 柄 + 垫块（推理游戏入口）。 */
+    ui_fill_round_rect(fb, (EpdRect){cx - 20, cy - 17, 26, 16}, 4, ink);
+    nothing_thick_line(fb, cx + 4, cy - 4, cx + 19, cy + 13, 7, ink);
+    nothing_thick_line(fb, cx - 16, cy + 16, cx + 14, cy + 16, 5, ink);
+}
+
 static void icon_notes(uint8_t* fb, int cx, int cy, uint8_t ink) {
     /* 便签：圆角卡描边 + 两行内容线 + 右下铅笔斜置（新增/编辑语义）。 */
     EpdRect body = {cx - 17, cy - 20, 34, 40};
@@ -121,13 +131,14 @@ static void icon_muyu(uint8_t* fb, int cx, int cy, uint8_t ink) {
     epd_fill_circle(cx + 20, cy + 21, 6, ink, fb);
 }
 
-static const apps_entry_t k_entries[6] = {
+static const apps_entry_t k_entries[7] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
     {"计算器", icon_calc, page_calc, true},
     {"便签", icon_notes, page_notes, true},
     {"番茄时钟", icon_pomodoro, page_pomodoro, true},
     {"木鱼", icon_muyu, page_muyu, true},
+    {"推理游戏", icon_avgr, page_avgr, true},
 };
 
 static EpdRect cell_rect(int index) {
