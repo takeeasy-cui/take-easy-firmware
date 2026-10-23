@@ -241,7 +241,35 @@ static struct {
     unsigned width, height;
     uint8_t fast_contrast, fast_phase;
     bool fast_white_edge;
-} s_covers[BOOK_ROWS];
+    /* index 必须以 -1 起：静态零值 0 恰与首页 leaf*rows=0 相等，prepare_covers 会
+     * 跳过初始化并逐行命中"index 相同且无像素"而不排队——刷机后首次进书架封面
+     * 零提交（V1.0.1 重构遗留；2026-10-22 修复）。 */
+    /* index starts at -1: a zero initialiser collides with the first page's
+     * leaf*rows==0, so the first shelf visit queues no cover jobs at all. */
+} s_covers[BOOK_ROWS] = { [0 ... BOOK_ROWS - 1] = { .index = -1 } };
+
+/* ---- 书架封面快照/预取（V1.0.2，2026-10-22）：翻页回退秒显 + 空闲预取下一页 ----
+ * 快照与预取共享一份内存，只保留一页；翻页后保留回退窗口，之后才让位预取；
+ * 书库/设置失效时经 invalidate_covers() 清空。实现见 prepare_covers 之前。 */
+#define SHELF_COVER_PREFETCH_SLOT 9
+#define SHELF_COVER_PREFETCH_COOLDOWN_MS 2500
+#define SHELF_COVER_PREFETCH_RESERVE (512u * 1024u)
+/* 2026-10-22（用户实测拍板）：预取链路拖慢书架加载（worker/SD 争用 + 翻页同步收集），
+ * A/B 验收先禁用；代码保留待后续重构后再启用。 */
+#define SHELF_COVER_PREFETCH_ENABLE 0
+typedef struct {
+    int leaf;
+    uint8_t *gray[BOOK_ROWS];
+    uint8_t *fast_bits[BOOK_ROWS];
+    unsigned width[BOOK_ROWS], height[BOOK_ROWS];
+    uint8_t fast_contrast[BOOK_ROWS], fast_phase[BOOK_ROWS];
+    bool fast_white_edge[BOOK_ROWS];
+} shelf_cover_snap_t;
+static shelf_cover_snap_t s_cover_snap = { .leaf = -1 };
+static int s_cover_prefetch_leaf = -1;
+static unsigned s_cover_prefetch_gen;
+static int64_t s_cover_prefetch_cooldown_ms;
+static void cover_snap_drop(void);
 static unsigned s_cover_pending_mask, s_cover_decode_mask, s_cover_warm_mask;
 static unsigned s_cover_dirty_mask, s_cover_present_mask;
 static int64_t s_cover_warm_after_ms;
@@ -567,45 +595,6 @@ static int shelf_rows(void) { return s_view == SHELF && app_settings_shelf_style
 #define SHELF_FAST_COVER_STRIDE ((SHELF_FAST_COVER_WIDTH + 7) / 8)
 #define SHELF_FAST_COVER_BYTES (SHELF_FAST_COVER_STRIDE * SHELF_FAST_COVER_HEIGHT)
 #define SHELF_FAST_CACHE_RESERVE (512u * 1024u)
-#define SHELF_GUARD_CACHE_BYTES (644u * 90u / 2u)
-typedef struct { EpdRect rect; int rotation, contrast; bool binary, valid; } shelf_guard_key_t;
-static uint8_t *s_guard_cache;
-static shelf_guard_key_t s_guard_keys[3];
-static bool s_guard_cache_attempted;
-static void release_guard_cache(void) {
-    free(s_guard_cache); s_guard_cache=NULL; s_guard_cache_attempted=false;
-    memset(s_guard_keys,0,sizeof(s_guard_keys));
-}
-// 缓存精确的输入和成品；逐行比对底图，任何封面、位置或模式变化均重绘。
-// Cache exact inputs and finished pixels; compare every input row so art, position and mode changes redraw.
-static void draw_shelf_guard(uint8_t *fb,EpdRect rect,int slot) {
-    const bool binary=s_view==SHELF&&app_settings_main_fast_refresh();
-    EpdRect p=ui_rotate_rect_to_fb(rect);
-    const bool fits=slot>=0&&slot<3&&!(p.x&1)&&!(p.width&1)&&p.x>=0&&p.y>=0&&
-        p.x+p.width<=epd_width()&&p.y+p.height<=epd_height()&&
-        (size_t)p.width*p.height/2<=SHELF_GUARD_CACHE_BYTES;
-    if(fits&&!s_guard_cache&&!s_guard_cache_attempted) {
-        s_guard_cache_attempted=true;
-        size_t bytes=6u*SHELF_GUARD_CACHE_BYTES;
-        if(heap_caps_get_free_size(MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)>=bytes+2u*1024u*1024u)
-            s_guard_cache=heap_caps_malloc(bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
-    }
-    if(!fits||!s_guard_cache){ui_draw_acrylic_guard(fb,rect);if(binary)ui_acrylic_bw_rect(fb,rect);return;}
-    shelf_guard_key_t *key=&s_guard_keys[slot];
-    size_t stride=(size_t)epd_width()/2,span=(size_t)p.width/2;
-    uint8_t *input=s_guard_cache+2u*slot*SHELF_GUARD_CACHE_BYTES,*output=input+SHELF_GUARD_CACHE_BYTES;
-    bool same=key->valid&&key->rotation==epd_get_rotation()&&key->contrast==app_settings_system_contrast()&&
-        key->binary==binary&&!memcmp(&key->rect,&rect,sizeof(rect));
-    for(int y=0;same&&y<p.height;++y)
-        same=!memcmp(fb+(size_t)(p.y+y)*stride+p.x/2,input+(size_t)y*span,span);
-    if(!same) {
-        key->valid=false;
-        for(int y=0;y<p.height;++y)memcpy(input+(size_t)y*span,fb+(size_t)(p.y+y)*stride+p.x/2,span);
-        ui_draw_acrylic_guard(fb,rect);if(binary)ui_acrylic_bw_rect(fb,rect);
-        for(int y=0;y<p.height;++y)memcpy(output+(size_t)y*span,fb+(size_t)(p.y+y)*stride+p.x/2,span);
-        *key=(shelf_guard_key_t){.rect=rect,.rotation=epd_get_rotation(),.contrast=app_settings_system_contrast(),.binary=binary,.valid=true};
-    } else for(int y=0;y<p.height;++y)memcpy(fb+(size_t)(p.y+y)*stride+p.x/2,output+(size_t)y*span,span);
-}
 static EpdRect row_rect(int row) {
     if (s_view == SHELF && app_settings_shelf_style() == 5)
         return (EpdRect){36, SHELF_CONTENT_TOP + row * SHELF_LIST_ROW_H, 612, SHELF_LIST_ROW_H};
@@ -627,7 +616,9 @@ static EpdRect shelf_cover_image(int row) {
 static unsigned s_cover_generation;
 static void invalidate_covers(void) {
     book_cover_jobs_cancel(s_cover_generation);s_cover_generation=0;
-    release_guard_cache();
+    cover_snap_drop();
+    s_cover_prefetch_leaf = -1;
+    s_cover_prefetch_cooldown_ms = 0;
     s_cover_pending_mask = s_cover_decode_mask = s_cover_warm_mask = 0;
     s_cover_dirty_mask = s_cover_present_mask = 0;
     for (int i = 0; i < BOOK_ROWS; ++i) {
@@ -790,13 +781,162 @@ static unsigned shelf_cover_reveal_mask(void) {
     return shelf_cover_frame_ready() ? s_cover_dirty_mask : 0;
 }
 
+/* ---- 书架封面页快照 + 下一页预取（V1.0.2，2026-10-22） ----
+ * 快照类型/变量/宏见 s_covers 定义处；以下为预取与恢复实现。 */
+static int leaves(void);
+
+static void cover_snap_drop(void) {
+    for (int i = 0; i < BOOK_ROWS; ++i) {
+        free(s_cover_snap.gray[i]);
+        free(s_cover_snap.fast_bits[i]);
+        s_cover_snap.gray[i] = NULL;
+        s_cover_snap.fast_bits[i] = NULL;
+    }
+    s_cover_snap.leaf = -1;
+}
+
+// 翻页把当前页搬入快照（指针搬家，不复制像素）；行数按当前书架布局。
+static void cover_snap_save_current(int leaf) {
+    cover_snap_drop();
+    int rows = shelf_rows();
+    s_cover_snap.leaf = leaf;
+    for (int row = 0; row < rows; ++row) {
+        s_cover_snap.gray[row] = s_covers[row].gray;           s_covers[row].gray = NULL;
+        s_cover_snap.fast_bits[row] = s_covers[row].fast_bits; s_covers[row].fast_bits = NULL;
+        s_cover_snap.width[row] = s_covers[row].width;
+        s_cover_snap.height[row] = s_covers[row].height;
+        s_cover_snap.fast_contrast[row] = s_covers[row].fast_contrast;
+        s_cover_snap.fast_phase[row] = s_covers[row].fast_phase;
+        s_cover_snap.fast_white_edge[row] = s_covers[row].fast_white_edge;
+    }
+}
+
+// 快照命中目标页：整体搬回 s_covers，返回是否命中。
+static bool cover_snap_restore(int leaf) {
+    if (s_cover_snap.leaf != leaf) return false;
+    int rows = shelf_rows();
+    for (int row = 0; row < rows; ++row) {
+        free(s_covers[row].gray);
+        free(s_covers[row].fast_bits);
+        s_covers[row].gray = s_cover_snap.gray[row];           s_cover_snap.gray[row] = NULL;
+        s_covers[row].fast_bits = s_cover_snap.fast_bits[row]; s_cover_snap.fast_bits[row] = NULL;
+        s_covers[row].width = s_cover_snap.width[row];
+        s_covers[row].height = s_cover_snap.height[row];
+        s_covers[row].fast_contrast = s_cover_snap.fast_contrast[row];
+        s_covers[row].fast_phase = s_cover_snap.fast_phase[row];
+        s_covers[row].fast_white_edge = s_cover_snap.fast_white_edge[row];
+        s_covers[row].index = leaf * rows + row;
+    }
+    cover_snap_drop();
+    return true;
+}
+
+// 预取完成收集：jobs 槽 9.. 逐行取出，全部落地后整页收编为快照。
+static bool shelf_cover_prefetch_collect(void) {
+    if (s_cover_prefetch_leaf < 0) return false;
+    // 翻页已另起代（预取被取消）时，残留槽全部作废，不再收编空页。
+    if (s_cover_generation && s_cover_prefetch_gen != s_cover_generation) {
+        s_cover_prefetch_leaf = -1;
+        return false;
+    }
+    int rows = shelf_rows();
+    bool pending = false;
+    for (int row = 0; row < rows; ++row) {
+        if (s_cover_snap.gray[row] || s_cover_snap.fast_bits[row]) continue;
+        book_cover_result_t result = {0};
+        int state = book_cover_jobs_take(s_cover_prefetch_gen, SHELF_COVER_PREFETCH_SLOT + row, &result);
+        if (state == 0) { pending = true; continue; }
+        if (state != 1) continue; /* 失败槽空缺，整页其余行照常 */
+        s_cover_snap.gray[row] = result.fast ? NULL : result.pixels;
+        s_cover_snap.fast_bits[row] = result.fast ? result.pixels : NULL;
+        s_cover_snap.width[row] = result.width;
+        s_cover_snap.height[row] = result.height;
+        s_cover_snap.fast_white_edge[row] = result.white_edge;
+        EpdRect image = shelf_cover_image(row);
+        s_cover_snap.fast_contrast[row] = (uint8_t)app_settings_system_contrast();
+        s_cover_snap.fast_phase[row] = (uint8_t)((image.x & 3) | ((image.y & 3) << 2));
+    }
+    if (pending) return false;
+    s_cover_snap.leaf = s_cover_prefetch_leaf;
+    s_cover_prefetch_leaf = -1;
+    return true;
+}
+
+// 空闲提交：把下一页封面排到 jobs 槽 9..（当前页槽位 0..8 不受影响）。
+static void shelf_cover_prefetch_submit(app_ctx_t *ctx) {
+    int target = ctx->leaf + 1;
+    if (target < 0 || target >= leaves() || s_view != SHELF) return;
+    if (s_cover_prefetch_leaf == target || s_cover_snap.leaf == target) return;
+    if (ctx->now_ms < s_cover_prefetch_cooldown_ms) return;
+    if (heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) < SHELF_COVER_PREFETCH_RESERVE) return;
+    cover_snap_drop(); /* 让位预取页；回退窗口已过 */
+    if (!s_cover_generation) s_cover_generation = book_cover_jobs_begin();
+    s_cover_prefetch_gen = s_cover_generation;
+    int rows = shelf_rows();
+    bool ok = false;
+    for (int row = 0; row < rows; ++row) {
+        int index = target * rows + row;
+        if (index < 0 || index >= s_visible_count || s_shelf[index].removed) continue;
+        EpdRect image = shelf_cover_image(row);
+        book_cover_job_t request = {0};
+        request.list = app_settings_shelf_style() == 5;
+        request.fast = app_settings_main_fast_refresh();
+        request.width = image.width; request.height = image.height;
+        request.stride = SHELF_FAST_COVER_STRIDE;
+        request.contrast = app_settings_system_contrast();
+        request.phase = (image.x & 3) | ((image.y & 3) << 2);
+        request.x = image.x; request.y = image.y;
+        copy_text(request.path, sizeof(request.path), s_shelf[index].path);
+        copy_text(request.title, sizeof(request.title), s_shelf[index].name);
+        copy_text(request.author, sizeof(request.author), s_shelf[index].author);
+        if (book_cover_jobs_submit(s_cover_prefetch_gen, SHELF_COVER_PREFETCH_SLOT + row, &request)) ok = true;
+    }
+    if (!ok) s_cover_prefetch_leaf = -1;
+    else s_cover_prefetch_leaf = target;
+}
+
+// 书架空闲轮询：先收尾已提交预取，再按需提交下一页。
+static void shelf_cover_prefetch_tick(app_ctx_t *ctx) {
+#if SHELF_COVER_PREFETCH_ENABLE
+    if (s_view != SHELF || s_cover_pending_mask || s_cover_batch_present_pending ||
+        (ctx->touch && ctx->touch->touched) || ctx->request_app || ctx->request_return ||
+        ctx->request_menu || s_clear_confirm || s_batch_confirm) return;
+    if (s_cover_prefetch_leaf >= 0) {
+        (void)shelf_cover_prefetch_collect();
+        return;
+    }
+    int target = ctx->leaf + 1;
+    if (target < 0 || target >= leaves()) return;
+    if (s_cover_snap.leaf == target) return;
+    shelf_cover_prefetch_submit(ctx);
+#else
+    (void)ctx;
+#endif
+}
+
 static void prepare_covers(app_ctx_t* ctx) {
     if (s_view != SHELF && s_view != MANAGE) return;
     int rows = shelf_rows();
     if (s_covers[0].index != ctx->leaf * rows) {
-        book_cover_jobs_cancel(s_cover_generation);s_cover_generation=book_cover_jobs_begin();
-        s_cover_pending_mask = s_cover_decode_mask = s_cover_warm_mask = 0;
-        s_cover_dirty_mask = s_cover_present_mask = 0;
+#if SHELF_COVER_PREFETCH_ENABLE
+        s_cover_prefetch_cooldown_ms = ctx->now_ms + SHELF_COVER_PREFETCH_COOLDOWN_MS;
+        // 翻到预取目标页时，先抢救 jobs 槽 9.. 成果进快照。
+        if (s_cover_prefetch_leaf == ctx->leaf) (void)shelf_cover_prefetch_collect();
+#endif
+        if (s_cover_snap.leaf == ctx->leaf) {
+            // 快照命中：直接恢复，不保留旧页（快照槽已被目标页占用）。
+            s_cover_pending_mask = s_cover_decode_mask = s_cover_warm_mask = 0;
+            s_cover_dirty_mask = s_cover_present_mask = 0;
+            (void)cover_snap_restore(ctx->leaf);
+            book_cover_jobs_cancel(s_cover_generation);s_cover_generation=book_cover_jobs_begin();
+            s_cover_prefetch_leaf = -1;
+        } else {
+            // 未命中：把旧页搬进快照（回退窗口），再进入常规提交。
+            if (s_covers[0].index >= 0) cover_snap_save_current(s_covers[0].index / rows);
+            book_cover_jobs_cancel(s_cover_generation);s_cover_generation=book_cover_jobs_begin();
+            s_cover_pending_mask = s_cover_decode_mask = s_cover_warm_mask = 0;
+            s_cover_dirty_mask = s_cover_present_mask = 0;
+        }
     }
     for (int row = 0; row < rows; ++row) {
         int index = ctx->leaf * rows + row;
@@ -912,7 +1052,7 @@ static void draw_shelf_cover(uint8_t* fb, EpdRect card, int row, const char* nam
     const bool artwork = shelf_cover_frame_ready();
     const bool has_art = (artwork && s_covers[row].gray) ||
         (artwork && app_settings_main_fast_refresh() && s_view==SHELF && fast_cover_matches(row,image));
-    ui_fill_rect_fast(image, UI_GRAY_LIGHT, fb);
+    ui_fill_rect_fast(image, 0xf0, fb);
     if (artwork && app_settings_main_fast_refresh() && s_view==SHELF && fast_cover_matches(row,image)) {
         ui_blit_mono_bitmap(fb,image,s_covers[row].fast_bits,SHELF_FAST_COVER_STRIDE);
     } else if (artwork && s_covers[row].gray) {
@@ -997,7 +1137,9 @@ static void draw_list_row(uint8_t *fb, int row, const shelf_entry_t *item) {
     int author_px = ttf_em_height_px(21), progress_px = ttf_em_height_px(19);
     fit_text(author, author_px, 378);
     int author_y = ui_text_fixed_width_px(ttf_em_height_px(27), item->name) > 378 ? 111 : 88;
-    ui_text_fixed_ink_vc(fb, 244, card.y + author_y, author_px, author, EPD_DRAW_ALIGN_LEFT, 0x60);
+    /* 2026-10-22（用户拍板黑白化）：作者次级信息原用灰字 0x60，改为纯黑；
+     * 字号差异已足以区分主次，不再依赖灰阶。 */
+    ui_text_fixed_ink_vc(fb, 244, card.y + author_y, author_px, author, EPD_DRAW_ALIGN_LEFT, 0x00);
     unsigned progress = item->has_progress ? item->pct : 0;
     if (progress > 100) progress = 100;
     char label[48]; snprintf(label, sizeof(label), progress == 100 ? "已读完 · %u%%" :
@@ -1013,18 +1155,15 @@ static void draw_shelf_furniture(uint8_t* fb) {
     if (!style || style == 5) return;
     for (int row = 0; row < 3; ++row) {
         int top = (s_view == SHELF ? SHELF_CONTENT_TOP : 224) + row * 282;
-        if (style == 1) {
-            ui_fill_rect_fast((EpdRect){36, top + 214, 612, 12}, 0x30, fb);
-            ui_hairline(fb, top + 214, 36, 612, 0x58);
-            ui_hairline(fb, top + 225, 36, 612, 0x10);
-        } else if (style == 2) {
-            EpdRect acrylic = {20, top + 136, 644, 90};
-            draw_shelf_guard(fb, acrylic, row);
-            if(s_view==SHELF&&app_settings_main_refresh_mode()==APP_MAIN_REFRESH_NORMAL){
-                EpdRect bands[3];for(int i=0;i<3;++i)bands[i]=(EpdRect){0,SHELF_CONTENT_TOP+136+i*282,UI_LOCK_WIDTH,90};
-                display_main_transition_gray_bands(bands,3);
-            }
-
+        if (style == 1)
+            /* 2026-10-22（黑白化）：原三片层板灰渐变（0x30/0x58/0x10）与样式2同归一条 2px 纯黑线。 */
+            ui_fill_rect_fast((EpdRect){36, top + 213, 612, 2}, 0x00, fb); else if (style == 2) {
+            /* 2026-10-22（用户拍板取消底色）：原亚克力灰底（644×90×3）整版灰阶迁移
+             * 是书架页切换闪烁的主源；取消灰底只留 2px 纯黑层板线——黑线由 DU 差分
+             * 快推，无灰阶过渡。guard 缓存与 gray_bands 随之移除。 */
+            /* Acrylic gray panels removed per user decision: whole-panel gray
+             * migration flashes on page turns. Keep a single 2px black line only. */
+            ui_fill_rect_fast((EpdRect){36, top + 213, 612, 2}, 0x00, fb);
         }
     }
 }
@@ -1058,8 +1197,9 @@ static void draw_shelf_pager(uint8_t *fb, int count, int page, int pages) {
     char label[64];
     snprintf(label, sizeof(label), "%d本书 · %02d/%02d", count, page + 1, pages);
     ui_text_vc(fb, 342, SHELF_PAGE_Y + 18, 21, label, EPD_DRAW_ALIGN_CENTER, false);
-    ui_draw_icon(fb, 204, SHELF_PAGE_Y + 22, 28, UI_ICON_CHEVRON_LEFT, page > 0 ? 0 : 0x90);
-    ui_draw_icon(fb, 480, SHELF_PAGE_Y + 22, 28, UI_ICON_CHEVRON_RIGHT, page + 1 < pages ? 0 : 0x90);
+    /* 黑白化：不可用方向的箭头原画灰色 0x90，改为不画；可用箭头纯黑。 */
+    if (page > 0) ui_draw_icon(fb, 204, SHELF_PAGE_Y + 22, 28, UI_ICON_CHEVRON_LEFT, 0);
+    if (page + 1 < pages) ui_draw_icon(fb, 480, SHELF_PAGE_Y + 22, 28, UI_ICON_CHEVRON_RIGHT, 0);
 }
 static app_redraw_t shelf_turn_page(app_ctx_t *ctx, int direction);
 static EpdRect import_rect(int index) { return (EpdRect){36, 230 + index * 164, 612, 136}; }
@@ -3170,10 +3310,11 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
         return;
     }
     ui_clear_page(fb);
-    // 普通和水波纹共享灰阶画面，只有快刷使用黑白底色。
-    // Normal and ripple share gray artwork; only fast refresh uses the BW background.
-    ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, UI_NAV_TOP},
-                  app_settings_main_fast_refresh() ? 0xf0 : 0xe0, fb);
+    /* 2026-10-22（与应用页一致）：题头用应用页同款 0xf0 极浅灰（0..1101）。
+     * 与白只差 1 级灰阶，切页只有极轻过渡；不再使用中灰底色。 */
+    /* Header matches the Apps page tone (0xf0): one gray step below white,
+     * so tab turns only carry the lightest transition. */
+    ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, UI_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
     if (s_message[0] || s_shelf_warning[0])
         ui_text(fb, UI_MARGIN, 934, 17, s_message[0] ? s_message : s_shelf_warning,
@@ -3196,6 +3337,16 @@ static void render(app_ctx_t* ctx, uint8_t* fb) {
     }
     draw_shelf_furniture(fb);
     draw_shelf_pager(fb, s_visible_count, ctx->leaf, leaves());
+    /* 2026-10-22（移植上游 rc99，书架混合 LUT）：封面/书架区注册为校准灰阶带，
+     * 普通模式切页时该带用原厂表渲（封面画质保真），外围用柔和表（防闪）。
+     * 仅普通模式注册；快刷/水波纹保持各自策略。 */
+    if (s_view == SHELF && app_settings_main_refresh_mode() == APP_MAIN_REFRESH_NORMAL) {
+        const EpdRect artwork = {0, SHELF_CONTENT_TOP, UI_LOCK_WIDTH,
+                                 (app_settings_shelf_style() == 5
+                                      ? 4 * SHELF_LIST_ROW_H            /* 210×4=840 → 96..936 */
+                                      : 3 * 282 + 130)};                /* 三行网格+底垫 → 96..1024 */
+        display_main_transition_gray_bands(&artwork, 1);
+    }
     /* 底部三并排按钮：切换（类别）/ 管理 / 导入（2026-10-17）。 */
     draw_shelf_bottom_button(fb, shelf_category_rect(), "切换", 118);
     draw_shelf_bottom_button(fb, shelf_manage_rect(), "管理", 114);
@@ -4323,6 +4474,7 @@ static bool shelf_backfill_read_books(bool* truncated) {
 }
 
 static void scan_shelf(app_ctx_t* ctx) {
+    const int64_t t_scan0 = esp_timer_get_time();
     const uint32_t progress_revision=book_progress_revision();
     shelf_category_init();
     for (int i=2;i<s_category_count;++i) s_categories[i].available=false;
@@ -4335,6 +4487,7 @@ static void scan_shelf(app_ctx_t* ctx) {
     book_store_root_t roots[BOOK_STORE_ROOT_MAX];
     int n = 0;
     esp_err_t root_err = book_store_roots(roots, &n);
+    ESP_LOGI(TAG, "shelf roots %d ms err=%s", (int)((esp_timer_get_time()-t_scan0)/1000), esp_err_to_name(root_err));
     bool truncated = false, unreadable = root_err != ESP_OK || book_store_roots_degraded(), skipped = false;
     nvs_handle_t favorites = 0;
     nvs_handle_t hidden = 0;
@@ -4342,6 +4495,7 @@ static void scan_shelf(app_ctx_t* ctx) {
     (void)nvs_open(SHELF_HIDDEN_NS, NVS_READONLY, &hidden);
     s_storage[0] = 0;
     for (int i = 0; i < n; ++i) {
+        const int64_t t_root = esp_timer_get_time();
         if (i == 0 || roots[i].is_flash || roots[i - 1].is_flash) {
             char capacity[64];
             snprintf(capacity, sizeof(capacity), "%s%s %.1f MB", s_storage[0] ? " · " : "",
@@ -4351,6 +4505,8 @@ static void scan_shelf(app_ctx_t* ctx) {
         if (s_view == SHELF && app_poll_main_navigation(ctx)) break;
         scan_shelf_dir(ctx, roots[i].path, roots[i].is_flash, favorites, hidden,
                        &truncated, &unreadable, &skipped);
+        ESP_LOGI(TAG, "shelf dir[%d] %s %lld ms books=%d", i, roots[i].path,
+                 (long long)((esp_timer_get_time()-t_root)/1000), s_count);
     }
     if (ctx->request_app) {
         if (favorites) nvs_close(favorites);
@@ -4403,7 +4559,8 @@ static void scan_shelf(app_ctx_t* ctx) {
     s_store_revision = book_store_revision();
     s_progress_revision = progress_revision;
     s_shelf_cache_valid = !unreadable && !truncated;
-    ESP_LOGI(TAG, "shelf books=%d roots=%d", s_count, n);
+    ESP_LOGI(TAG, "shelf books=%d roots=%d scan=%lld ms", s_count, n,
+             (long long)((esp_timer_get_time() - t_scan0) / 1000));
 }
 
 static void refresh_cached_progress(app_ctx_t* ctx) {
@@ -6536,6 +6693,7 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
             return APP_REDRAW_AREA;
         }
     }
+    shelf_cover_prefetch_tick(ctx);
     warm_shelf_lock_cover(ctx);
     if (ctx->request_app) return APP_REDRAW_NONE;
     // 目录暂借系统字体，不应把正文按系统字体重新分页。/ The directory borrows the system face without repaginating the reader.

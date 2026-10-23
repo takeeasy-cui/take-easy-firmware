@@ -440,7 +440,9 @@ static void draw_password(uint8_t* fb) {
     provisioning_button(fb, password_control_rect(44), "取消", 44);
     provisioning_button(fb, password_control_rect(45), s_password_visible ? "隐藏" : "显示", 45);
     provisioning_button(fb, password_control_rect(46), "连接并保存", 46);
-    ui_keyboard_draw(fb, 560);
+    /* 2026-10-22：键盘下移到屏底（694..1216），与设备名称编辑页同标准（v2：
+     * 键盘贴底夏盖导航区，本页不画导航，控件区全部在键盘上方）。 */
+    ui_keyboard_draw(fb, 694);
 }
 
 static void queue_network_start(read_pico_transfer_mode_t mode) {
@@ -645,7 +647,7 @@ static app_redraw_t provisioning_action(int id) {
 
 static bool s_input_layout, s_input_settle;
 static app_redraw_t password_paint(app_ctx_t *ctx, bool field, bool controls) {
-    ui_keyboard_update_t update = ui_keyboard_update(ctx->fb, 560, password_control_rect(47),
+    ui_keyboard_update_t update = ui_keyboard_update(ctx->fb, 694, password_control_rect(47),
         UI_PX_BODY, !s_password_visible, NULL, field);
     EpdRect extra = {UI_MARGIN, 215, ui_content_width(), controls ? 287 : 159};
     if (update.field || controls) {
@@ -669,7 +671,7 @@ static app_redraw_t password_paint(app_ctx_t *ctx, bool field, bool controls) {
 static app_redraw_t provisioning_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
     if (s_view == TRANSFER_PASSWORD) {
         if (ev->type == UI_GESTURE_PRESS)
-            return ui_keyboard_press(ev->x0, ev->y0, 560, ctx->now_ms) ? password_paint(ctx, false, false) : APP_REDRAW_NONE;
+            return ui_keyboard_press(ev->x0, ev->y0, 694, ctx->now_ms) ? password_paint(ctx, false, false) : APP_REDRAW_NONE;
         bool feedback = ev->type != UI_GESTURE_LONG_PRESS && ui_keyboard_release();
         if (ev->type != UI_GESTURE_TAP) return feedback ? password_paint(ctx, false, false) : APP_REDRAW_NONE;
         int x = ev->x0, y = ev->y0;
@@ -681,13 +683,13 @@ static app_redraw_t provisioning_gesture(app_ctx_t* ctx, const ui_gesture_event_
             if (changed == APP_REDRAW_AREA) return password_paint(ctx, true, true);
             return changed;
         }
-        ui_keyboard_result_t result = ui_keyboard_tap(x, y, 560, ctx->now_ms);
+        ui_keyboard_result_t result = ui_keyboard_tap(x, y, 694, ctx->now_ms);
         if (result == UI_KEYBOARD_DONE) {
             app_redraw_t changed = provisioning_action(46);
             if (changed == APP_REDRAW_PAGE) return changed;
             result = UI_KEYBOARD_CHANGED;
         }
-        if (result == UI_KEYBOARD_CHANGED) return password_paint(ctx, false, y >= 990 && x >= 534);
+        if (result == UI_KEYBOARD_CHANGED) return password_paint(ctx, false, y >= 1124 && x >= 534);
         return APP_REDRAW_NONE;
     }
     int old = s_pressed;

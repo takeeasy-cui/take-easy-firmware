@@ -348,70 +348,70 @@ void nothing_draw_sun(uint8_t* fb, int x, int y, int size) {
     }
 }
 
-/* ================= 实况天气图标族（用户 2026-10-19）=================
- * 统一 size 见方（建议 120），Feather 公版造型几何化：多云=日+云、阴=云、
- * 雾=三横条、雨=云+斜短线、雪=云+小圆点。线宽随 size 缩放（s=size/24）。 */
-static void wx_cloud(uint8_t* fb, int cx, int cy, int s, int w) {
-    /* 云底：三圆并排 + 底部矩形封平。 */
-    epd_fill_circle(cx - 3 * s, cy, 2 * s, NX8_INK, fb);
-    epd_fill_circle(cx, cy - s, 3 * s, NX8_INK, fb);
-    epd_fill_circle(cx + 3 * s, cy, 2 * s, NX8_INK, fb);
-    /* 内缩挖空成描边云。 */
-    epd_fill_circle(cx - 3 * s, cy, 2 * s - w, NX8_PAPER, fb);
-    epd_fill_circle(cx, cy - s, 3 * s - w, NX8_PAPER, fb);
-    epd_fill_circle(cx + 3 * s, cy, 2 * s - w, NX8_PAPER, fb);
-    /* 底边封口（内外双线）。 */
-    nothing_thick_line(fb, cx - 4 * s, cy, cx + 4 * s, cy, w, NX8_INK);
-    nothing_thick_line(fb, cx - 3 * s + 1, cy + w, cx + 3 * s - 1, cy + w, 1, NX8_PAPER);
+/* ================= 实况天气图标族（Feather 公版几何，2026-10-23 重画） =================
+ * 全族按 Feather 24×24 公版参数化（s=size/24，线宽 w=2s 与 sun 完全一致）：
+ * cloud = 大圆 r8@(9,12) + 小圆 r5@(18,15) + 平底 (9,20)→(18,20)；
+ * 描边 = 墨色并集 → 内缩 w 纸色空腔。空腔用"两内缩圆 + 底带矩形"互相重叠，
+ * 杜绝 v1 三圆相切残留的碎墨（糊源）；云宽从 50% 提到 ~92% size（糊+小的修复）。
+ * 晴 = Feather sun 公版（用户确认无需调整），未动。 */
+static void wx_cloud(uint8_t* fb, int ox, int oy, int u, int w) {
+    int c1x = ox + 9 * u,  c1y = oy + 12 * u, c1r = 8 * u;   /* Feather 大圆 */
+    int c2x = ox + 18 * u, c2y = oy + 15 * u, c2r = 5 * u;   /* Feather 小圆 */
+    epd_fill_circle(c1x, c1y, c1r, NX8_INK, fb);
+    epd_fill_circle(c2x, c2y, c2r, NX8_INK, fb);
+    epd_fill_rect((EpdRect){ox + 9 * u, oy + 15 * u, 9 * u, 5 * u}, NX8_INK, fb);
+    /* 纸色空腔：底带矩形横跨中部补缝，与两内缩圆必然重叠 → 描边均匀无碎墨 */
+    epd_fill_circle(c1x, c1y, c1r - w, NX8_PAPER, fb);
+    epd_fill_circle(c2x, c2y, c2r - w, NX8_PAPER, fb);
+    epd_fill_rect((EpdRect){ox + 9 * u, oy + 15 * u, 9 * u, 5 * u - w}, NX8_PAPER, fb);
 }
 
 void nothing_draw_weather(uint8_t* fb, int x, int y, int size, int code) {
     int s = size / 24;
     if (s < 1) s = 1;
     int w = 2 * s;
-    int cx = x + size / 2, cy = y + size / 2;
     switch (code) {
-        case 1: { /* 多云：小日盘右上 + 云左下 */
-            int sx = cx + 3 * s, sy = cy - 3 * s, rs = 2 * s;
-            epd_fill_circle(sx, sy, rs, NX8_INK, fb);
-            epd_fill_circle(sx, sy, rs - w, NX8_PAPER, fb);
-            static const int v8[8][2] = {{1000, 0}, {707, 707}, {0, 1000}, {-707, 707},
-                                         {-1000, 0}, {-707, -707}, {0, -1000}, {707, -707}};
-            for (int k = 0; k < 8; ++k) {
-                int ax = sx + v8[k][0] * (rs + s) / 1000;
-                int ay = sy + v8[k][1] * (rs + s) / 1000;
-                int bx = sx + v8[k][0] * (rs + 2 * s) / 1000;
-                int by = sy + v8[k][1] * (rs + 2 * s) / 1000;
+        case 1: { /* 多云：Feather 小日盘右上（环+4 短射线）+ 云左下 3/4 尺寸 */
+            int sx = x + 33 * s / 2, sy = y + 13 * s / 2;      /* (16.5s, 6.5s) */
+            epd_fill_circle(sx, sy, 3 * s, NX8_INK, fb);
+            epd_fill_circle(sx, sy, 3 * s - w, NX8_PAPER, fb);
+            static const int v4[4][2] = {{0, -1000}, {707, -707}, {1000, 0}, {707, 707}};
+            for (int k = 0; k < 4; ++k) {
+                int ax = sx + v4[k][0] * 9 * s / 2 / 1000;
+                int ay = sy + v4[k][1] * 9 * s / 2 / 1000;
+                int bx = sx + v4[k][0] * 6 * s / 1000;
+                int by = sy + v4[k][1] * 6 * s / 1000;
                 nothing_thick_line(fb, ax, ay, bx, by, w, NX8_INK);
             }
-            wx_cloud(fb, cx - s, cy + 2 * s, s, w);
+            wx_cloud(fb, x - s / 2, y + 4 * s, 3 * s / 4, w);
             break;
         }
-        case 2: /* 阴：单云居中 */
-            wx_cloud(fb, cx, cy, s + 1, w);
+        case 2: /* 阴：Feather cloud 居中（~92% size 宽） */
+            wx_cloud(fb, x, y, s, w);
             break;
-        case 3: { /* 雾：云 + 下方两条横杠 */
-            wx_cloud(fb, cx, cy - 2 * s, s, w);
-            nothing_thick_line(fb, cx - 4 * s, cy + 3 * s, cx + 4 * s, cy + 3 * s, w, NX8_INK);
-            nothing_thick_line(fb, cx - 3 * s, cy + 5 * s, cx + 3 * s, cy + 5 * s, w, NX8_INK);
+        case 3: /* 雾：云上移 + 两条横杠（Feather cloud-fog 布局） */
+            wx_cloud(fb, x, y - 2 * s, s, w);
+            nothing_thick_line(fb, x + 6 * s, y + 20 * s, x + 18 * s, y + 20 * s, w, NX8_INK);
+            nothing_thick_line(fb, x + 15 * s / 2, y + 45 * s / 2, x + 33 * s / 2, y + 45 * s / 2, w, NX8_INK);
             break;
-        }
-        case 4: { /* 雨：云 + 三条斜短线 */
-            wx_cloud(fb, cx, cy - 2 * s, s, w);
-            for (int k = -1; k <= 1; ++k)
-                nothing_thick_line(fb, cx + k * 3 * s, cy + 2 * s,
-                                   cx + k * 3 * s - s, cy + 5 * s, w, NX8_INK);
+        case 4: /* 雨：云上移 + 三条竖直雨线（Feather cloud-rain） */
+            wx_cloud(fb, x, y - 3 * s, s, w);
+            for (int k = 0; k < 3; ++k) {
+                int rx = x + (8 + 4 * k) * s;
+                nothing_thick_line(fb, rx, y + 19 * s, rx, y + 22 * s, w, NX8_INK);
+            }
             break;
-        }
-        case 5: { /* 雪：云 + 三列小圆点 */
-            wx_cloud(fb, cx, cy - 2 * s, s, w);
-            for (int k = -1; k <= 1; ++k) {
-                epd_fill_circle(cx + k * 3 * s, cy + 3 * s, s, NX8_INK, fb);
-                epd_fill_circle(cx + k * 3 * s - s / 2, cy + 5 * s, s, NX8_INK, fb);
+        case 5: { /* 雪：云上移 + 两行雪点（Feather cloud-snow 布局） */
+            wx_cloud(fb, x, y - 3 * s, s, w);
+            static const int flakes[5][2] = {{7, 38}, {12, 38}, {17, 38}, {19, 44}, {29, 44}};
+            for (int k = 0; k < 5; ++k) {
+                int fx = x + flakes[k][0] * s / 2;             /* 7/12/17/9.5/14.5 单位 */
+                int fy = y + flakes[k][1] * s / 2;             /* 19s / 22s */
+                epd_fill_circle(fx, fy, 4 * s / 3, NX8_INK, fb);
             }
             break;
         }
-        case 0: /* 晴：原太阳 */
+        case 0: /* 晴：Feather sun 公版（未动） */
         default:
             nothing_draw_sun(fb, x, y, size);
             break;

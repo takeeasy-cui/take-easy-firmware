@@ -36,6 +36,9 @@ static const char* TAG = "sd_card";
 static sdmmc_card_t* card;
 static int probe_state;
 static bool filesystem_unreadable;
+// 大容量 TF 卡全盘统计耗时不可控；与挂载忙状态分离的异步统计占用标志。
+// Async full-FAT accounting flag, separate from the probe busy state.
+static bool space_busy;
 static portMUX_TYPE state_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool media_invalidated;
 static read_pico_sd_info_t cached_info;
@@ -123,7 +126,12 @@ static void fill_info(read_pico_sd_info_t* info, esp_err_t mount_err) {
     info->capacity_bytes = (uint64_t)card->csd.capacity * card->csd.sector_size;
     // 空间统计失败不覆盖「挂载成功」，仍允许正常读取文件。
     // Allocation-query failure must not turn a mounted filesystem into a mount failure.
-    (void)fill_space(info);
+    // 2026-10-22（上游 rc98 对齐）：挂载发布时不再同步全盘统计——大容量卡的全 FAT 扫描
+    // 曾经卡住唤醒与字体加载。先发布「已挂载可读」，全盘统计改由文件页的异步
+    // read_pico_sd_start_space_refresh() 进行，统计中 space_error=NOT_FINISHED。
+    // Upstream rc98: publish readable media immediately and defer full-FAT accounting
+    // to the Files page's async start_space_refresh; never behind wake/font readiness.
+    info->space_error = ESP_ERR_NOT_FINISHED;
 }
 
 static void ensure_media_dirs(void) {
@@ -279,6 +287,15 @@ static void probe_task(void* arg) {
         );
     }
     publish_info(&info);
+    if (err == ESP_OK) {
+        // 挂载完成立即后台补一次全 FAT 空闲统计（fill_space 会独占 FATFS 自锁，
+        // 必须与上层文件访问错峰：开机阶段用户还在首页，正好利用空窗）。
+        // 否则首次书架扫描触发统计时与 opendir 抢锁 → 等锁 10s（大卡 FAT 表）→
+        // opendir 超时失败 → 书架 0 本后靠进度回填兜底（2026-10-23 串口定位）。
+        // Kick one background full-FAT accounting right after mount so it never
+        // contends with upper-layer scans (FF_FS_REENTRANT lock is exclusive).
+        read_pico_sd_start_space_refresh();
+    }
     vTaskDelete(NULL);
 }
 
@@ -335,20 +352,65 @@ esp_err_t read_pico_sd_get_info(read_pico_sd_info_t* info) {
 // 驱动操作期间占用忙状态，不在临界区执行 I/O。/ Reserve busy state across driver I/O outside the critical section.
 static bool begin_operation(void) {
     portENTER_CRITICAL(&state_lock);
-    bool ready = probe_state != 1;
+    // 统计占用与重挂/USB交接同步：空间统计中不允许接管卡。
+    // Remount/USB handoff must wait for a running accounting owner.
+    bool ready = probe_state != 1 && !space_busy;
     if (ready) probe_state = 1;
     portEXIT_CRITICAL(&state_lock);
     return ready;
+}
+
+// 空间统计专用忙状态：不占用 probe_state，统计期间 get_info 仍报告已挂载。
+// Accounting-only busy state: probe_state stays free, so get_info keeps reporting mounted.
+static bool begin_space_refresh(void) {
+    portENTER_CRITICAL(&state_lock);
+    bool ready = probe_state != 1 && !space_busy && cached_info.mounted && !media_invalidated;
+    if (ready) space_busy = true;
+    portEXIT_CRITICAL(&state_lock);
+    return ready;
+}
+
+static esp_err_t finish_space_refresh(void) {
+    read_pico_sd_info_t info;
+    esp_err_t err = read_pico_sd_get_info(&info);
+    if (err == ESP_OK && info.mounted) {
+        err = fill_space(&info);
+        publish_info(&info);
+    }
+    portENTER_CRITICAL(&state_lock);
+    space_busy = false;
+    portEXIT_CRITICAL(&state_lock);
+    return err;
+}
+
+static void space_task(void *arg) {
+    (void)arg;
+    (void)finish_space_refresh();
+    vTaskDelete(NULL);
+}
+
+esp_err_t read_pico_sd_start_space_refresh(void) {
+    read_pico_sd_info_t info;
+    esp_err_t err = read_pico_sd_get_info(&info);
+    if (err != ESP_OK || !info.mounted) return err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
+    if (!begin_space_refresh()) return ESP_ERR_NOT_FINISHED;
+    // 后台只读统计；统计期间仍可正常读文件，重挂/USB交接等它释放。
+    // Background read-only accounting; reads continue and remount/USB handoff waits for release.
+    if (xTaskCreate(space_task, "sd_space", 4096, NULL, 2, NULL) != pdPASS) {
+        portENTER_CRITICAL(&state_lock);
+        space_busy = false;
+        portEXIT_CRITICAL(&state_lock);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_ERR_NOT_FINISHED;
 }
 
 esp_err_t read_pico_sd_refresh_space(void) {
     read_pico_sd_info_t info;
     esp_err_t err = read_pico_sd_get_info(&info);
     if (err != ESP_OK || !info.mounted) return err != ESP_OK ? err : ESP_ERR_INVALID_STATE;
-    if (!begin_operation()) return ESP_ERR_NOT_FINISHED;
-    err = fill_space(&info);
-    publish_info(&info);
-    return err;
+    if (!begin_space_refresh()) return ESP_ERR_NOT_FINISHED;
+    return finish_space_refresh();
 }
 
 esp_err_t read_pico_sd_remount(void) {

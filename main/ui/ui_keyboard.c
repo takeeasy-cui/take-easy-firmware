@@ -202,7 +202,9 @@ void ui_keyboard_begin(ui_text_edit_t *edit, bool ascii_only) {
             ime_glue_doc_context(before);
         } else {
             s_chinese = false;
-            snprintf(s_notice, sizeof(s_notice), "输入引擎加载失败，暂用英文键盘");
+            /* V1.0.2（B 方案精简词库）：码表随刷机写入 ime 分区，正常运行不会走到这里；
+             * 仅分区为空/损坏时降级英文键盘（英文/数字不受影响），重新刷机可修复。 */
+            snprintf(s_notice, sizeof(s_notice), "输入引擎加载失败，暂用英文输入");
         }
     }
     engine_pull();

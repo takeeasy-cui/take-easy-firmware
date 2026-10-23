@@ -1,8 +1,12 @@
 # Name,   Type, SubType, Offset,  Size,     Flags
+# V1.0.2 布局（B 方案精简码表）：ota_0/ota_1 4M→5M（app 槽扩容，游戏引擎预留），
+# ime 4M→1M（精简拼音表 0x93000 + 两分 0x6C09A），storage +1M（内容物总 0x1000000）。
+# 已发布设备 TF 升级不刷分区表：新固件按 ime 分区尺寸运行时分派新旧布局（IME.cpp）。
+# 注意：storage 起点移位 → 升级/全量刷机后 /flash/books 内置书区自动重建（TF 卡书不受影响）。
 nvs,      data, nvs,     0x9000,  0x5000,
 phy_init, data, phy,     0xE000,  0x1000,
-ota_0,    app,  ota_0,   0x10000, 0x400000,
-ime,      data, 0x22,    0x410000,0x400000,
-ota_1,    app,  ota_1,   0x810000,0x400000,
-otadata,  data, ota,     0xC10000,0x2000,
-storage,  data, fat,     0xC12000,0x3EE000,
+ota_0,    app,  ota_0,   0x10000, 0x500000,
+ime,      data, 0x22,    0x510000,0x100000,
+ota_1,    app,  ota_1,   0x610000,0x500000,
+otadata,  data, ota,     0xB10000,0x2000,
+storage,  data, fat,     0xB12000,0x4EE000,

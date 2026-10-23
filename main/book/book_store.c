@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "read_pico_sd.h"
 #include "wear_levelling.h"
@@ -61,7 +62,10 @@ static esp_err_t flash_root(book_store_root_t* out) {
             .max_files = 4,
             .allocation_unit_size = 4096,
         };
+        int64_t t0 = esp_timer_get_time();
         esp_err_t err = esp_vfs_fat_spiflash_mount_rw_wl("/flash", "storage", &config, &s_wl);
+        ESP_LOGI(TAG, "flash mount %lld ms err=%s", (long long)((esp_timer_get_time() - t0) / 1000),
+                 esp_err_to_name(err));
         if (err != ESP_OK) {
             s_wl = WL_INVALID_HANDLE;
             ESP_LOGW(TAG, "flash mount: %s", esp_err_to_name(err));
@@ -120,9 +124,25 @@ size_t book_store_file_limit(const book_store_root_t* root) {
 
 uint64_t book_store_free_bytes(const book_store_root_t* root) {
     if (root == NULL) return 0;
-    if (!root->is_flash && !sd_ready()) return 0;
+    if (!root->is_flash) {
+        // TF 空间取 SD 驱动的后台统计缓存（挂载后异步首轮扫描 FAT）。
+        // 同步 esp_vfs_fat_info("/sdcard") 会全表扫空闲簇，大卡秒级——
+        // 书架每次重扫卡 7-8 秒的元凶（2026-10-23 用户复测）。
+        // SD free space comes from the driver's async accounting cache; a direct
+        // esp_vfs_fat_info scans the whole FAT for free clusters (seconds on big cards).
+        read_pico_sd_info_t info = {0};
+        if (read_pico_sd_get_info(&info) == ESP_OK && info.space_valid)
+            return info.free_bytes;
+        // 缓存未就绪只返回 0：绝不能在这里踢后台统计——fill_space 独占 FATFS
+        // 自锁，会与调用方（书架扫描 opendir）抢锁 10 秒并导致 opendir 超时
+        // 失败（2026-10-23 串口定位）。统计由挂载完成时机自动触发（read_pico_sd
+        // probe_task），开机阶段完成，进书架时缓存已就绪。
+        // Cold cache reports 0; NEVER kick accounting here — it grabs the FATFS
+        // lock and starves the caller's opendir. Statistics run right after mount.
+        return 0;
+    }
     uint64_t total = 0, free_bytes = 0;
-    esp_err_t err = esp_vfs_fat_info(root->is_flash ? "/flash" : "/sdcard", &total, &free_bytes);
+    esp_err_t err = esp_vfs_fat_info("/flash", &total, &free_bytes);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "FAT capacity: %s", esp_err_to_name(err));
         return 0;

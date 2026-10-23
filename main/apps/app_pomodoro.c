@@ -3,8 +3,9 @@
  * rand_0/start/features/pomodoro.mdx + 本机触摸/三键习惯融合）：
  *  - 标准 25/5：专注与休息自动交替，直到离开本页；阶段结束播放短提醒音；
  *  - 时长可调：专注 15..60、休息 5..60，步进 5（节奏设置页）；
- *  - 主页点阵大数字显示剩余分钟，每分钟局部 DU 刷新一次（数字用时间点阵样式，
- *    用户 2026-10-20 拍板与首页/锁屏时间同款）；
+ *  - 主页点阵大数字显示剩余分:秒（mm:ss，每秒局部 DU 刷新一次；冒号用点阵冒号，
+ *    用户 2026-10-22 拍板分钟+秒钟）；
+ *  - 专注/休息进行中退出需二次确认（第一次提示，8 秒内再按一次才退出）；
  *  - 离开页面 = 暂停（保留剩余与阶段）；锁屏浅睡不暂停（esp_timer 走时），
  *    回页后 on_tick 自动结算跨过的阶段；
  *  - 双入口：首页点击时间区 / 应用页图标（推理游戏前，游戏殿后）。
@@ -37,7 +38,8 @@ static bool s_paused;
 static int64_t s_end_us;          /* 运行中：本阶段结束时刻（esp_timer us） */
 static int64_t s_pause_left_us;   /* 暂停时剩余 us */
 static int s_done;                /* 本次会话完成番茄数 */
-static int s_show_min = -1;       /* 上次上屏的分钟数 */
+static int s_show_sec = -1;       /* 上次上屏的剩余秒数 */
+static int64_t s_exit_asked_us;   /* 退出确认窗口起算时刻；0 = 未在确认中 */
 static int s_edit_w, s_edit_b;    /* 节奏编辑缓冲 */
 static char s_notice[80];
 
@@ -56,11 +58,11 @@ static EpdRect setup_save_rect(bool right) {
     return (EpdRect){right ? 352 : 36, 860, 296, 84};
 }
 
-static int pomo_remaining_min(void) {
-    if (s_run == RUN_IDLE) return app_settings_pomo_work();
+static int pomo_remaining_secs(void) {
+    if (s_run == RUN_IDLE) return app_settings_pomo_work() * 60;
     int64_t left = s_paused ? s_pause_left_us : s_end_us - esp_timer_get_time();
     if (left < 0) left = 0;
-    return (int)((left + 59999999) / 60000000);   /* 向上取整：秒级剩余显示分钟 */
+    return (int)((left + 999999) / 1000000);   /* 向上取整：秒级剩余 */
 }
 
 static void pomo_chime(void) {
@@ -74,21 +76,25 @@ static const char* pomo_state_label(void) {
     return s_run == RUN_FOCUS ? "专注中" : "休息中";
 }
 
+/* mm:ss 点阵绘制（绘制与局部重绘共用一套几何；x 从 8 起容纳 5 字符 pitch=23）。 */
+static void pomo_paint_mmss(uint8_t* fb, int secs) {
+    const int pitch = 23, dr = 10;
+    char cs[32];
+    snprintf(cs, sizeof(cs), "%02d:%02d", secs / 60, secs % 60);
+    int w = nothing_dot_text_w(cs, pitch);
+    nothing_dot_text(fb, (684 - w) / 2, 280, cs, dr, pitch, NX8_INK);
+}
+
 /* ---- 主页 ---- */
 static void render_main(uint8_t* fb) {
     ui_text(fb, 36, 54, 40, "番茄时钟", EPD_DRAW_ALIGN_LEFT, false);
     ui_hairline(fb, 116, 36, 612, NX8_GRID);
     ui_text_vc(fb, 342, 210, 34, pomo_state_label(), EPD_DRAW_ALIGN_CENTER, false);
-    char cs[8];
-    snprintf(cs, sizeof(cs), "%d", pomo_remaining_min());
-    const int pitch = 36, dr = 16;
-    int w = nothing_dot_text_w(cs, pitch);
-    nothing_dot_text(fb, (684 - w) / 2, 250, cs, dr, pitch, NX8_INK);
-    ui_text_vc(fb, 342, 548, 24, "分钟", EPD_DRAW_ALIGN_CENTER, false);
+    pomo_paint_mmss(fb, pomo_remaining_secs());
     char done[48];
     snprintf(done, sizeof(done), "本次已完成 %d 个番茄", s_done);
-    ui_text_vc(fb, 342, 612, 26, done, EPD_DRAW_ALIGN_CENTER, false);
-    if (s_notice[0]) ui_text_vc(fb, 342, 660, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
+    ui_text_vc(fb, 342, 548, 26, done, EPD_DRAW_ALIGN_CENTER, false);
+    if (s_notice[0]) ui_text_vc(fb, 342, 620, 24, s_notice, EPD_DRAW_ALIGN_CENTER, false);
     const char* main_label = s_run == RUN_IDLE ? "开始专注"
                              : s_paused ? "继续" : "暂停";
     ui_draw_button(fb, btn_row(), main_label, false);
@@ -102,30 +108,51 @@ static void pomo_reset(void) {
     s_run = RUN_IDLE;
     s_paused = false;
     s_done = 0;
-    s_show_min = -1;
+    s_show_sec = -1;
+    s_exit_asked_us = 0;
     s_notice[0] = 0;
+}
+
+/* 退出统一入口（右键/中键长按）：专注或休息进行中需二次确认——第一次提示，
+ * 8 秒内再按一次才真正退出；任何屏幕点击取消确认窗口。 */
+static app_redraw_t pomo_try_exit(app_ctx_t* ctx) {
+    if (s_run != RUN_IDLE && !s_paused) {
+        int64_t now = esp_timer_get_time();
+        if (s_exit_asked_us != 0 && now - s_exit_asked_us < 8000000LL) {
+            s_exit_asked_us = 0;
+            ctx->request_return = true;
+            return APP_REDRAW_NONE;
+        }
+        s_exit_asked_us = now;
+        snprintf(s_notice, sizeof(s_notice), "%s进行中，再按一次确认退出",
+                 s_run == RUN_FOCUS ? "专注" : "休息");
+        return APP_REDRAW_PAGE;
+    }
+    ctx->request_return = true;
+    return APP_REDRAW_NONE;
 }
 
 static app_redraw_t main_tap(app_ctx_t* ctx, uint16_t x, uint16_t y) {
     (void)ctx;
+    s_exit_asked_us = 0;              /* 任何屏幕点击都取消退出确认窗口 */
     if (ui_rect_hit(btn_row(), x, y)) {
         if (s_run == RUN_IDLE) {
             s_run = RUN_FOCUS;
             s_end_us = esp_timer_get_time() + (int64_t)app_settings_pomo_work() * 60000000LL;
             s_paused = false;
-            s_show_min = -1;
+            s_show_sec = -1;
             snprintf(s_notice, sizeof(s_notice), "专注 %d 分钟，加油",
                      app_settings_pomo_work());
         } else if (s_paused) {
             s_end_us = esp_timer_get_time() + s_pause_left_us;
             s_paused = false;
-            s_show_min = -1;
+            s_show_sec = -1;
             s_notice[0] = 0;
         } else {
             s_pause_left_us = s_end_us - esp_timer_get_time();
             if (s_pause_left_us < 0) s_pause_left_us = 0;
             s_paused = true;
-            s_show_min = -1;
+            s_show_sec = -1;
             snprintf(s_notice, sizeof(s_notice), "已暂停");
         }
         return APP_REDRAW_PAGE;
@@ -205,36 +232,30 @@ static app_redraw_t on_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
 }
 
 static app_redraw_t on_key(app_ctx_t* ctx, int key) {
-    /* 右键：子页回主页；主页返回切页来源（首页时间区 / 应用页）。 */
+    /* 右键：子页回主页；主页返回切页来源（退出需二次确认）。 */
     if (key == UI_KEY_3) {
         if (s_view != VIEW_MAIN) {
             s_view = VIEW_MAIN;
             s_notice[0] = 0;
             return APP_REDRAW_PAGE;
         }
-        ctx->request_return = true;
-        return APP_REDRAW_NONE;
+        return pomo_try_exit(ctx);
     }
     if (key == UI_KEY_2) return APP_REDRAW_FULL;
     return APP_REDRAW_NONE;          /* 左键无绑定 → 全局快捷菜单 */
 }
 
 static app_redraw_t on_key_long(app_ctx_t* ctx, int key) {
-    /* 21h（真机反馈）：中键长按=退出（request_return 恒语义，同计算器，返回来源页；
-     * 21g 误用 ui_nav_request(ctx,0)，那是跳首页不是退出）。计时切页离开=自动暂停。 */
-    if (key == UI_KEY_2) ctx->request_return = true;
+    /* 中键长按 = 退出（退出需二次确认；计时中退出=切换后自动暂停）。 */
+    if (key == UI_KEY_2) return pomo_try_exit(ctx);
     return APP_REDRAW_NONE;
 }
 
-/* 主页分钟自绘（21f 根因修复）：APP_REDRAW_AREA 只推屏不调 render，
- * 回调必须自己把数字区画好——擦旧迹再画新点阵数字，几何与 render_main 一致。 */
-static void pomo_paint_minutes(uint8_t* fb, int minutes) {
-    epd_fill_rect((EpdRect){36, 240, 612, 274}, NX8_PAPER, fb);
-    char cs[8];
-    snprintf(cs, sizeof(cs), "%d", minutes);
-    const int pitch = 36, dr = 16;
-    int w = nothing_dot_text_w(cs, pitch);
-    nothing_dot_text(fb, (684 - w) / 2, 250, cs, dr, pitch, NX8_INK);
+/* 主页 mm:ss 自绘：APP_REDRAW_AREA 只推屏不调 render，回调必须自己把数字区
+ * 画好——擦旧迹再画新点阵，几何与 render_main 的 pomo_paint_mmss 一致。 */
+static void pomo_paint_seconds(uint8_t* fb, int secs) {
+    epd_fill_rect((EpdRect){8, 268, 668, 200}, NX8_PAPER, fb);
+    pomo_paint_mmss(fb, secs);
 }
 
 static app_redraw_t on_tick(app_ctx_t* ctx) {
@@ -256,13 +277,13 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
             }
             pomo_chime();
         }
-        s_show_min = -1;
+        s_show_sec = -1;
         return APP_REDRAW_PAGE;
     }
-    int m = pomo_remaining_min();
-    if (m != s_show_min) {
-        s_show_min = m;
-        pomo_paint_minutes(ctx->fb, m);
+    int secs = pomo_remaining_secs();
+    if (secs != s_show_sec) {
+        s_show_sec = secs;
+        pomo_paint_seconds(ctx->fb, secs);
         return APP_REDRAW_AREA;
     }
     return APP_REDRAW_NONE;
@@ -270,8 +291,8 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
 
 static EpdRect area_hint(app_ctx_t* ctx) {
     (void)ctx;
-    /* 只推分钟数字条带（与 pomo_paint_minutes 的擦画区一致，DU 局部最快）。 */
-    return (EpdRect){36, 240, 612, 274};
+    /* 只推 mm:ss 数字条带（与 pomo_paint_seconds 的擦画区一致，DU 局部最快）。 */
+    return (EpdRect){8, 268, 668, 200};
 }
 
 static void pomo_on_enter(app_ctx_t* ctx) {
@@ -282,7 +303,8 @@ static void pomo_on_enter(app_ctx_t* ctx) {
         if (s_pause_left_us < 0) s_pause_left_us = 0;
         s_paused = true;
     }
-    s_show_min = -1;
+    s_show_sec = -1;
+    s_exit_asked_us = 0;
 }
 
 static void pomo_on_exit(app_ctx_t* ctx) {
@@ -293,6 +315,7 @@ static void pomo_on_exit(app_ctx_t* ctx) {
         if (s_pause_left_us < 0) s_pause_left_us = 0;
         s_paused = true;
     }
+    s_exit_asked_us = 0;
     s_notice[0] = 0;
 }
 

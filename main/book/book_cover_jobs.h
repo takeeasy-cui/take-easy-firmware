@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include "book_cover.h"
+/* V1.0.2（2026-10-22）：封面快照/预取经 A/B 验收暂缓——槽位回到 V1.0 的 9，
+ * 预取链路在 app_book.c 中以宏禁用，封面加载链路与 V1.0 完全一致。 */
 #define BOOK_COVER_JOB_SLOTS 9
 /// 请求只存快照，不借用页面字符串。/ Requests own snapshots instead of borrowing page strings.
 typedef struct {

@@ -178,6 +178,11 @@ void app_main(void) {
     char interrupted[PICO_BOOT_PATH_MAX];
     if (pico_boot_interrupted_book(interrupted, sizeof(interrupted))) first = &app_boot_recovery;
     rp_boot_mark("resume");
+    // SD probe 开机即后台启动（异步 sd_probe 任务，不阻塞开机流程）：
+    // 此前首次进书架才触发 probe，用户要对着"0 本书"空等整段大卡挂载时间。
+    // Boot-time background SD probe: the first shelf visit no longer waits
+    // for a cold mount (probe usually finishes while the user is on Home).
+    read_pico_sd_start_probe();
     app_loop_run(&(app_loop_config_t){
         .hl = &hl,
         .fb = framebuffer,

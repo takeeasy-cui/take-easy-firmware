@@ -163,6 +163,10 @@ int ui_text_title_fit(char *text, int preferred_px, int width, const char *font_
 /// Rasterize the active face directly with gray antialiasing at the target size, visually centered and independent of UI scaling.
 void ui_text_title_vc(uint8_t *fb, int x, int center_y, int px, const char *text,
                       const char *font_sample, enum EpdFontFlags align);
+/// 与标题共用字体及抗锯齿规则，边缘混合至卡片实际底色（上游 rc97，目录灰底行用）。
+/// Share title font/AA rules while blending edges into the card's actual background (upstream rc97, for gray TOC rows).
+void ui_text_title_background_vc(uint8_t *fb, int x, int center_y, int px, const char *text,
+                                 const char *font_sample, enum EpdFontFlags align, uint8_t background);
 void ui_text_bw(
     uint8_t* framebuffer, int x, int y_top, int px, const char* text,
     enum EpdFontFlags align, bool inverted

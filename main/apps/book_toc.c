@@ -61,6 +61,21 @@ static void fit_line(char *text, int px, int width) {
     }
 }
 
+// 上游 rc97 对齐：书名/章名统一走标题路径（当前系统字体、原生字号、整行字体来源、
+// 灰阶抗锯齿），并把边缘混合到实际底色——选中灰底行不再留白边，粗细不再因缺字回退突变。
+// Aligned with upstream rc97: book/chapter names share the title path (active face, native sizes,
+// whole-line font source, gray AA) and blend edges into the actual row background.
+static void toc_title(uint8_t *fb, EpdRect box, int preferred_px, const char *text, uint8_t background) {
+    char sample[160], shown[160];
+    one_line(sample, sizeof(sample), text);
+    memcpy(shown, sample, strlen(sample) + 1);
+    int px = ui_text_effective_px(preferred_px);
+    if (px > box.height - 2) px = box.height - 2;
+    px = ui_text_title_fit(shown, px, box.width, sample);
+    ui_text_title_background_vc(fb, box.x, box.y + box.height / 2, px, shown, sample,
+                                EPD_DRAW_ALIGN_LEFT, background);
+}
+
 int book_toc_hit(uint16_t x, uint16_t y, int page, size_t chapters) {
     if (x < 100 && y >= 76 && y < 151) return BOOK_TOC_BACK;
     if (y >= 1018 && y < 1086) {
@@ -125,8 +140,7 @@ void book_toc_render(uint8_t *fb, const char *book_title, size_t chapters,
     char title[160];
     one_line(title, sizeof(title), book_title ? book_title : "");
     if (!title[0]) strcpy(title, "当前书籍");
-    fit_line(title,ui_text_effective_px(23),420);
-    ui_text_box(fb,(EpdRect){TOC_LEFT,96,420,48},23,title,EPD_DRAW_ALIGN_LEFT,false);
+    toc_title(fb, (EpdRect){TOC_LEFT, 96, 420, 48}, 23, title, 0xe0);
     char total[48];
     snprintf(total, sizeof(total), "%u 节", (unsigned)chapters);
     ui_text_box(fb,(EpdRect){482,96,166,48},23,total,EPD_DRAW_ALIGN_RIGHT,false);
@@ -158,8 +172,8 @@ void book_toc_render(uint8_t *fb, const char *book_title, size_t chapters,
                 snprintf(raw, sizeof(raw), "第 %u 节", (unsigned)index + 1);
             one_line(label, sizeof(label), raw);
             if (!label[0]) snprintf(label, sizeof(label), "第 %u 节", (unsigned)index + 1);
-            fit_line(label,ui_text_effective_px(30),selected?420:495);
-            ui_text_box(fb,(EpdRect){r.x+79,r.y+9,selected?420:495,76},30,label,EPD_DRAW_ALIGN_LEFT,false);
+            toc_title(fb, (EpdRect){r.x + 79, r.y + 9, selected ? 420 : 495, 76}, 30, label,
+                      selected ? 0xc0 : UI_GRAY_WHITE);
             if (selected)
                 ui_text_box(fb,(EpdRect){r.x+r.width-93,r.y+11,71,72},24,"当前",EPD_DRAW_ALIGN_RIGHT,false);
         }

@@ -804,9 +804,10 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
     if (s_page == SETTINGS_PIN_ENTRY) { ui_pinpad_paint(fb, &s_pinpad, ui_pinpad_full()); return; }
     ui_clear_page(fb);
 
+    /* 2026-10-22（用户拍板，与应用页一致）：题头统一 0xf0 极浅灰（原主列表普通模式中灰 0xe0
+     * 是整页大面积灰阶迁移主源之一）。 */
     if (s_page == SETTINGS_MAIN || s_page == SETTINGS_SHELF_STYLE)
-        ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, UI_NAV_TOP},
-                      app_settings_main_fast_refresh() && s_page == SETTINGS_MAIN ? 0xf0 : 0xe0, fb);
+        ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, UI_NAV_TOP}, 0xf0, fb);
     ui_nav_status(fb);
     if (s_page == SETTINGS_LOCK_PIN) {
         back_header(fb, "锁屏密码");
@@ -1412,8 +1413,10 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
     // 主列表也要有一行提示位：确认、修复结果都写在这里，不然点了没有任何回音。
     // The main list needs a notice line too: confirmation and the repair result land here, or a tap
     // would have no answer at all.
-    ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, SETTINGS_BODY_TOP},
-                  app_settings_main_fast_refresh() ? 0xf0 : 0xe0, fb);
+    /* 2026-10-22（与应用页一致）：题头改 0xf0 极浅灰，与书架/应用页同色调；
+     * 与白只差 1 级，切页过渡极轻。 */
+    /* Top strip uses the Apps-page tone (0xf0); one gray step below white. */
+    ui_fill_rect_fast((EpdRect){0, 0, UI_LOCK_WIDTH, SETTINGS_BODY_TOP}, 0xf0, fb);
     ui_nav_status(fb);
     /* 2026-10-17：主页面删“设置”标题，仅保留状态栏下一行提示位。 */
     if (s_notice[0]) ui_text_fixed_vc(fb, 36, 88, 18, s_notice, EPD_DRAW_ALIGN_LEFT, false);

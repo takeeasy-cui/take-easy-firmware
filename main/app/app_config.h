@@ -52,3 +52,10 @@
 // 全像素灰阶仍不能无限消除累积残影，达到阈值时同步做完整 GC16。
 // Full-pixel gray updates cannot remove unlimited ghosting, so periodically run a synchronous GC16.
 #define APP_UI_FAST_GC16_EVERY 12
+/* 2026-10-22（对齐上游 rc99）：普通四页切换以差分为主；每 12 次切页一次原厂 GC16
+ * 全像素清残影（不是 GL16——GC16 才能压掉累积灰底），减少全屏过渡频率。
+ * 仅周期清残影升级为 GC16，日常仍 GL16 差分，闪烁面最小化。 */
+/* Aligned with upstream rc99: ordinary tab changes stay differential; every
+ * 12th change runs one full-pixel GC16 cleanup (not GL16 - only GC16 clears
+ * accumulated gray floors), keeping full-screen transitions infrequent. */
+#define APP_UI_MAIN_GL16_EVERY 12

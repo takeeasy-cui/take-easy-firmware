@@ -6,12 +6,14 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
 idf_build_set_property(MINIMAL_BUILD ON)
 
-# 版本：固定 1.0（用户 2026-10-17 钦定：定稿前不再随批次变更，定稿后再升）。
-# 定稿前各批次以 git 提交与 CHANGELOG 日期区分。
+# 版本：V1.0 于 2026-10-21 正式发布（用户 2026-10-17 钦定固定至定稿）。
+# 定稿后升版：1.0.1 = 三 bug 修复 + SD 异步统计 + 目录标题；
+# 1.0.2 = 分界线残影对症（窄带周期全驱）+ WiFi 密码键盘下移贴底。
+# ota_update.c 的 TF 升级校验接受 "1.0" 前缀，1.0.x 全系互通。
 if(DEFINED ENV{PICO_PROJECT_VER} AND NOT "$ENV{PICO_PROJECT_VER}" STREQUAL "")
     set(PROJECT_VER "$ENV{PICO_PROJECT_VER}")
 else()
-    set(PROJECT_VER "1.0")
+    set(PROJECT_VER "1.0.2")
 endif()
 project(Read_Pico)
 

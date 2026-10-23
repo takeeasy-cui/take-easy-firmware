@@ -138,3 +138,33 @@ const EpdWaveform* display_main_normal_waveform(void) {
     waveform.temp_intervals=base->temp_intervals;
     return &waveform;
 }
+
+/* 2026-10-22（移植上游 rc99）：仅书架普通切页——封面/材质灰阶完整保留原表校准迁移，
+ * 留白（to=15）只向白推动、不先压黑；解决"全软化表下封面偏浅"与"原表整版硬过渡闪"的矛盾。
+ * GL16/GC16 两种目标模式独立缓存；OOM 回退原厂表。 */
+/* Ported from upstream rc99: shelf-only ordinary transitions keep calibrated cover
+ * grays while whitespace drives white only, avoiding reverse blackening. GL16 and
+ * GC16 variants are cached independently; OOM falls back to the vendor table. */
+const EpdWaveform* display_main_shelf_waveform(enum EpdDrawMode draw_mode) {
+    static EpdWaveformPhases phases[2];
+    static const EpdWaveformPhases *ranges[2][1]={{&phases[0]},{&phases[1]}};
+    static EpdWaveformMode modes[2]={{MODE_GL16,1,ranges[0]},{MODE_GC16,1,ranges[1]}};
+    static const EpdWaveformMode *mode_ptrs[2][1]={{&modes[0]},{&modes[1]}};
+    static EpdWaveform waves[2]={
+        {.num_modes=1,.num_temp_ranges=1,.mode_data=mode_ptrs[0]},
+        {.num_modes=1,.num_temp_ranges=1,.mode_data=mode_ptrs[1]}};
+    int index=draw_mode==MODE_GC16?1:0;
+    if(phases[index].luts)return &waves[index];
+    const EpdWaveformPhases *original=e0470_waveform_phases(&E0470_WAVEFORM,draw_mode);
+    const EpdWaveformPhases *soft=e0470_waveform_phases(display_main_normal_waveform(),MODE_GL16);
+    if(!original||!soft||!original->luts||!soft->luts||original->phase_times||soft->phase_times||original->phases>soft->phases)
+        return &E0470_WAVEFORM;
+    size_t size=(size_t)original->phases*16*4;
+    uint8_t *data=heap_caps_malloc(size,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(!data)return &E0470_WAVEFORM;
+    memcpy(data,original->luts,size);
+    for(int f=0;f<original->phases;++f)memcpy(data+f*16*4+15*4,soft->luts+f*16*4+15*4,4);
+    phases[index]=(EpdWaveformPhases){original->phases,data,NULL};
+    waves[index].temp_intervals=E0470_WAVEFORM.temp_intervals;
+    return &waves[index];
+}

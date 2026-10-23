@@ -213,9 +213,60 @@ void app_settings_init(void) {
     esp_err_t err = nvs_flash_init();
     // 设置分区异常时保留原数据供恢复，绝不因空间不足自动擦除用户资料。
     // Preserve settings on NVS errors; a full partition must never silently erase profile data.
-    if (err != ESP_OK) {
+    // 2026-10-21（全新设备 Bug 1 修复）：全新设备 nvs 分区（网页刷机不覆盖）里是出厂
+    // 遗留数据，nvs_flash_init 返回 NO_FREE_PAGES / NEW_VERSION_FOUND 表示分区已损坏或
+    // 版本不符——此时用户资料本就不可读，直接 erase 后干净初始化，避免新设备上
+    // WiFi/设置全部静默写不进；其它错误码仍不擦除、保持原数据。
+    // 2026-10-21 (fresh-device Bug 1 fix): on a brand-new unit the nvs partition carries
+    // factory leftovers that web flashing never touches; NO_FREE_PAGES / NEW_VERSION_FOUND
+    // mean the region is corrupt or wrong-format, so the profile data is unreadable anyway.
+    // Erase and re-init cleanly to avoid silent write failures on a new device; other error
+    // codes still preserve the partition untouched.
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "nvs init %s, erase and re-init", esp_err_to_name(err));
+        esp_err_t erased = nvs_flash_erase();
+        err = erased == ESP_OK ? nvs_flash_init() : erased;
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "nvs re-init %s, use deep sleep", esp_err_to_name(err));
+            return;
+        }
+    } else if (err != ESP_OK) {
         ESP_LOGW(TAG, "nvs init %s, use deep sleep", esp_err_to_name(err));
         return;
+    }
+
+    /* 2026-10-21（设备 2 场景补全，写探测）：此前跑过参考固件的设备，nvs 分区是同版本
+     * 格式的合法数据但已被参考固件塞满——nvs_flash_init 成功、读取正常（表现为设置全
+     * 是默认值、锁屏不弹出），但本固件所有 set/commit 因无空闲页而失败，即设备 2 的
+     * “WiFi 存不上、字体存不上”。用一次 te_boot 计数提交做写探测：仅当两个明确的
+     * 空间错误码（本固件自身键值远不足以填满 20KB 分区，写满必为外来数据）才擦除重建
+     * 后补写一次；其它错误码只记日志不动分区。 */
+    /* Write probe for the device-2 scenario: a prior reference firmware can leave the nvs
+     * partition valid-but-full; init succeeds and reads work, yet every commit fails for lack
+     * of free pages. Probe once with a boot-counter commit; erase and re-init only on the two
+     * explicit space errors (our own keys can never fill 20KB, so a full partition is foreign
+     * data). Other error codes are logged without touching the partition. */
+    {
+        nvs_handle_t probe_handle;
+        if (nvs_open(NVS_NS, NVS_READWRITE, &probe_handle) == ESP_OK) {
+            uint8_t boots = 0;
+            (void)nvs_get_u8(probe_handle, "te_boot", &boots);
+            esp_err_t probe = nvs_set_u8(probe_handle, "te_boot", (uint8_t)(boots + 1));
+            if (probe == ESP_OK) probe = nvs_commit(probe_handle);
+            nvs_close(probe_handle);
+            if (probe == ESP_ERR_NVS_NOT_ENOUGH_SPACE || probe == ESP_ERR_NVS_NO_FREE_PAGES) {
+                ESP_LOGW(TAG, "nvs write probe %s, erase and re-init", esp_err_to_name(probe));
+                if (nvs_flash_erase() == ESP_OK && nvs_flash_init() == ESP_OK) {
+                    if (nvs_open(NVS_NS, NVS_READWRITE, &probe_handle) == ESP_OK) {
+                        (void)nvs_set_u8(probe_handle, "te_boot", 1);
+                        (void)nvs_commit(probe_handle);
+                        nvs_close(probe_handle);
+                    }
+                }
+            } else if (probe != ESP_OK) {
+                ESP_LOGW(TAG, "nvs write probe %s (kept as-is)", esp_err_to_name(probe));
+            }
+        }
     }
 
     nvs_handle_t h;

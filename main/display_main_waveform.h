@@ -16,3 +16,7 @@ const EpdWaveform* display_main_bw_waveform(void);
 /// 普通模式灰边交错，端点/相数/推动数量不变；OOM回退原柔和灰阶。
 /// Ordinary gray-edge interleaving keeps endpoints/phase counts/pulse counts; OOM falls back to original soft grays.
 const EpdWaveform* display_main_normal_waveform(void);
+
+/// 仅书架普通切页：封面/材质灰阶完整保留（原表校准），留白只向白推动不先压黑。
+/// Ordinary shelf transitions keep calibrated cover grays; whitespace drives white only without reverse blackening.
+const EpdWaveform* display_main_shelf_waveform(enum EpdDrawMode draw_mode);

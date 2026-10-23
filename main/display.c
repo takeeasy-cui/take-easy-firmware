@@ -292,33 +292,47 @@ static bool main_begin(EpdiyHighlevelState* hl, enum EpdDrawError* result) {
     EpdRect body_area=main_body_area();
     if(marker_with_body)body_area.height=UI_NAV_MARKER_SCAN_END;
     if (cache) main_band_copy(hl, cache, false);
-    const EpdWaveform* body_wave = normal ? display_main_normal_waveform() : gray_fallback ? display_main_gray_waveform()
+    /* 2026-10-22（分界线残影重做，用户指示：参考其他界面的刷新模式，不做小条独立刷新）：
+     * 差分扫描的等灰保持永远不驱动分界带（fb 恒白/黑），面板边沿串挠造成的物理变黑
+     * 只进不出，表现为导航栏上方黑线残影。普通模式切页改为一次全像素校准 GL16
+     * （书架切页同款路径）直达分界带底部 0..1120——GL16 表自带的白底补推帧会把整片
+     * 白底（含分界带）重推回白，残影无处累积。原先的周期性整理与小带单刷删除，
+     * 路径只剩这一条。 */
+    /* Ghosting redo: equal-gray holds never drive the divider strip (always white/black
+     * in fb) while panel-edge crosstalk keeps darkening it. Ordinary page changes now use
+     * one full-pixel calibrated GL16 scan (the same path shelf transitions already use)
+     * down to y=1120: the GL16 white-background re-push tick re-drives the whole white
+     * area including the strip, so the ghost has nowhere to accumulate. The periodic
+     * settling and the standalone strip scan are gone; this is the single path. */
+    /* 2026-10-22（对齐上游 rc99）：日常 = 柔和表差分（只驱动变化像素）；每
+     * APP_UI_MAIN_GL16_EVERY(12) 次切页升级为一次原厂 GC16 全像素（GC16 才能压掉
+     * 累积灰底与分界带）；书架灰阶带区域同一帧选混合 LUT（见 shelf_regions）。 */
+    /* Aligned with upstream rc99: daily turns stay soft-table differentials; every
+     * 12th turn is promoted to one full-pixel GC16 cleanup, and shelf gray bands
+     * pick the hybrid LUT in the same frame (see shelf_regions). */
+    const EpdWaveform* body_wave = normal ? display_main_normal_waveform()
+        : gray_fallback ? display_main_gray_waveform()
         : shelf_exit ? display_main_shelf_exit_waveform() : display_main_bw_waveform();
     enum EpdDrawMode body_mode = normal || gray_fallback ? MODE_GL16 : MODE_DU;
     bool body_full = false;
-    // 普通切页只驱动变化像素，完整中灰相位不缩短；每十二次仍用原表清理内容区。
-    // Ordinary changes drive differing pixels without shortening midgray phases; the original table still cleans the body every twelfth change.
     if (normal && changed) {
         ++s_page_refreshes;
-        if (APP_UI_FAST_GC16_EVERY > 0 && s_page_refreshes >= APP_UI_FAST_GC16_EVERY) {
+        if (APP_UI_MAIN_GL16_EVERY > 0 && s_page_refreshes >= APP_UI_MAIN_GL16_EVERY) {
             s_page_refreshes = 0;
             body_wave = &E0470_WAVEFORM;
             body_mode = MODE_GC16;
             body_full = true;
         }
     }
+    const bool shelf_regions = normal && changed && s_main_band_count && (changing_page || body_full);
+    if (normal) body_area.height = UI_NAV_MARKER_SCAN_END;
     use_scan_for(body_wave, body_mode);
     epd_poweron();
     epd_hl_waveform(hl, body_wave);
     int64_t start = esp_timer_get_time();
-    // 快刷/水波纹不攒强刷次数；普通的周期整理也不能进入底栏。
-    // Fast/water accrue no forced-cleanup debt; ordinary periodic settling also excludes navigation.
-    if(normal&&changing_page&&changed&&s_main_band_count&&!body_full){
-        // 题头、封面和亚克力合并为同一轮校准GL16，不再按上下区域顺序输出。
-        // Present header, covers and acrylic in one calibrated GL16 scan, without serial upper/lower updates.
-        epd_hl_waveform(hl,&E0470_WAVEFORM);use_scan_for(&E0470_WAVEFORM,MODE_GL16);
-        *result=epd_hl_update_area_full(hl,MODE_GL16,25,body_area);
-    } else if (water && changing_page && changed) {
+    // 快刷/水波纹不攒强刷次数；快刷的周期整理仍走 fast_page 出口。
+    // Fast/water accrue no forced-cleanup debt; fast keeps its cadence in fast_page.
+    if (water && changing_page && changed) {
         // 水波纹直接输出最终灰阶图，不先刷黑白、不追加整页灰阶；失败由统一恢复处理。
         // Water outputs the final gray target directly, without a BW prepass or a second whole-page gray update; common recovery handles failure.
         read_pico_epd_use_scan(READ_PICO_EPD_SCAN_FAST);
@@ -338,6 +352,27 @@ static bool main_begin(EpdiyHighlevelState* hl, enum EpdDrawError* result) {
         // Release main-animation LUTs instead of competing with networking and reader resources.
         e0470_page_turn_release();
     } else if (!changed) *result = EPD_DRAW_SUCCESS;
+    else if (shelf_regions) {
+        /* 2026-10-22（移植上游 rc99）：书架普通切页——同一帧逐列选柔和/校准表，
+         * 上下文字与中间封面一起开始，不再串行三段旧图。周期 GC16 时校准区升级为 GC16。 */
+        /* Ported from upstream rc99: shelf ordinary turns pick soft/calibrated LUTs
+         * by column in the same frame so chrome and art start together; the strong
+         * band upgrades to GC16 on the periodic cleanup turn. */
+        EpdRect last = s_main_bands[s_main_band_count - 1];
+        int top = s_main_bands[0].y & ~31, bottom = (last.y + last.height + 31) & ~31;
+        if (bottom > UI_NAV_REFRESH_END) bottom = UI_NAV_REFRESH_END;
+        *result = e0470_update_regions(hl, body_area,
+            (EpdRect){0, top, body_area.width, bottom - top},
+            display_main_normal_waveform(),
+            display_main_shelf_waveform(body_full ? MODE_GC16 : MODE_GL16),
+            body_full ? MODE_GC16 : MODE_GL16);
+        if (*result == EPD_DRAW_NO_PHASES_AVAILABLE) {
+            // 低内存仍一次输出整张目标；不退回分段等待或更改真实back。
+            // Low memory still presents the whole target once, without serial waiting or a fabricated baseline.
+            epd_hl_waveform(hl, display_main_normal_waveform());
+            *result = epd_hl_update_area(hl, MODE_GL16, 25, body_area);
+        }
+    }
     else *result = body_full ? epd_hl_update_area_full(hl, body_mode, 25, body_area)
                             : epd_hl_update_area(hl, body_mode, 25, body_area);
     if (cache) {

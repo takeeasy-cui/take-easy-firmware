@@ -518,7 +518,12 @@ static void storage_amount(char *text,size_t size,uint64_t bytes) {
 }
 static void storage_usage(const read_pico_sd_info_t *info,char *total,size_t total_size,char *usage,size_t usage_size) {
     storage_amount(total,total_size,info->space_valid?info->filesystem_bytes:info->capacity_bytes);
-    if (!storage_space_valid(info)) { snprintf(usage,usage_size,"空间统计暂不可用，请重新进入此页"); return; }
+    if (!storage_space_valid(info)) {
+        // 上游 rc98 对齐：后台统计进行中不是故障，文件操作不受影响。
+        // Aligned with upstream rc98: background accounting is not a fault; file access is unaffected.
+        if (info->space_error==ESP_ERR_NOT_FINISHED) { snprintf(usage,usage_size,"正在统计空间，文件可正常使用"); return; }
+        snprintf(usage,usage_size,"空间统计暂不可用，请重新进入此页"); return;
+    }
     char used[24],available[24];
     storage_amount(used,sizeof(used),info->filesystem_bytes-info->free_bytes);
     storage_amount(available,sizeof(available),info->free_bytes);
@@ -658,7 +663,9 @@ static void on_enter(app_ctx_t *ctx) {
     s_page = 0; s_scan_pending = true;
     read_pico_sd_start_probe();
     if (read_pico_sd_get_info(&s_sd)==ESP_OK && s_sd.mounted) {
-        (void)read_pico_sd_refresh_space(); read_pico_sd_get_info(&s_sd);
+        // rc98 对齐：不再同步全盘统计（大容量卡会卡首帧）；后台任务完成后 on_tick 拉取。
+        // Aligned with rc98: no synchronous full-FAT scan on entry; on_tick collects the result.
+        (void)read_pico_sd_start_space_refresh();
     }
     s_space_poll_ms=ctx->now_ms;
     s_sd_format_confirm = false;
@@ -687,18 +694,27 @@ static app_redraw_t on_tick(app_ctx_t *ctx) {
             ? rename_paint(ctx, false) : APP_REDRAW_NONE;
     }
     if (!s_scan_pending) {
-        if (s_folder<0 && s_sd.mounted && !(ctx->touch && ctx->touch->touched) && ctx->now_ms-s_space_poll_ms>=15000) {
+        // rc98 对齐：统计进行中 500ms 快轮询取结果；完成后回到 15s 周期启动新一轮异步统计。
+        // Aligned with rc98: poll the running count every 500ms; when settled, restart async accounting every 15s.
+        bool counting = s_sd.mounted && s_sd.space_error==ESP_ERR_NOT_FINISHED && !storage_space_valid(&s_sd);
+        int64_t interval = counting ? 500 : 15000;
+        if (s_folder<0 && s_sd.mounted && !(ctx->touch && ctx->touch->touched) && ctx->now_ms-s_space_poll_ms>=interval) {
             s_space_poll_ms=ctx->now_ms;
-            read_pico_sd_info_t previous=s_sd;
-            (void)read_pico_sd_refresh_space(); read_pico_sd_get_info(&s_sd);
-            if (previous.space_valid!=s_sd.space_valid || previous.filesystem_bytes!=s_sd.filesystem_bytes || previous.free_bytes!=s_sd.free_bytes)
-                return APP_REDRAW_PAGE;
+            if (counting) {
+                read_pico_sd_info_t previous=s_sd;
+                read_pico_sd_get_info(&s_sd);
+                if (previous.space_valid!=s_sd.space_valid || previous.filesystem_bytes!=s_sd.filesystem_bytes || previous.free_bytes!=s_sd.free_bytes)
+                    return APP_REDRAW_PAGE;
+            } else {
+                (void)read_pico_sd_start_space_refresh();
+                read_pico_sd_get_info(&s_sd);
+            }
         }
         return APP_REDRAW_NONE;
     }
     if (read_pico_sd_get_info(&s_sd) == ESP_ERR_NOT_FINISHED) return APP_REDRAW_NONE;
     s_scan_pending = false;
-    if (s_sd.mounted) { (void)read_pico_sd_refresh_space(); read_pico_sd_get_info(&s_sd); }
+    if (s_sd.mounted) (void)read_pico_sd_start_space_refresh();
     s_space_poll_ms=ctx->now_ms;
     for (int i = 0; i < 3; ++i) s_counts[i] = count_root(i);
     if (s_folder >= 0) scan_folder(s_folder);

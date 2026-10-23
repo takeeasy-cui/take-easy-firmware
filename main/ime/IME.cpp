@@ -21,18 +21,22 @@
 static const char *IME_TAG = "IME";
 static const int64_t IME_PERF_SLOW_US = 12000;
 
-/* take-easy 移植（2026-10-19 方案 A）：拼音/两分码表原以 embed 符号驻留 app 镜像；
- * 本固件 app 分区仅剩 ~0.7MB 塞不下 3.9MB 码表，改放自定义 data 分区 "ime"
- * （partitions_16M.csv：0x410000 起 4MB），esp_partition_mmap 直读 flash
- * （等效原 embed 的 XIP 驻留，不占 PSRAM）。
- * 分区内布局：偏移 0x000000 = ime_table_pinyin.bin（3,481,419B）；
- * 偏移 0x360000 = liangfen.bin（442,698B）；总 3,981,642B < 0x400000。 */
-#define IME_PINYIN_BIN_SIZE 3481419u
-#define IME_LF_BASE_OFFSET  0x360000u
-#define IME_LF_BIN_SIZE     442698u
+/* take-easy 移植（2026-10-19 方案 A；2026-10-22 起 B 方案双布局）：拼音/两分码表
+ * 驻留自定义 data 分区 "ime"，esp_partition_mmap 直读 flash（等效原 embed 的
+ * XIP 驻留，不占 PSRAM）。按分区实际尺寸分派两种布局（TF 升级不刷分区表，
+ * 已发布旧设备上永远还是旧 4MB 分区，同一份固件两种都要能跑）：
+ *   旧布局（ime ≥ 4MB，1.0/1.0.1 设备）：全量表 3,481,419B@0 + 两分@0x360000；
+ *   新布局（ime = 1MB，V1.0.2 起网页全量刷机）：精简表固长 0x93000@0 +
+ *     两分@(0x93000 + 442,698B)，总 1,044,810B < 1MB。 */
+#define IME_PINYIN_BIN_SIZE_OLD 3481419u   /* 旧布局：全量表长度 */
+#define IME_LF_BASE_OFFSET_OLD  0x360000u  /* 旧布局：两分基址 */
+#define IME_COMPACT_PAD         0x93000u   /* 新布局：精简表固长 = 两分基址 */
+#define IME_LF_BIN_SIZE         442698u
 static esp_partition_mmap_handle_t s_ime_map_handle;
 static const uint8_t *s_ime_map;
 static size_t s_ime_map_size;
+static size_t s_ime_pinyin_size;   /* 布局分派后的拼音表有效长度 */
+static size_t s_ime_lf_offset;     /* 布局分派后的两分基址 */
 static const uint8_t *imePartitionMapped(size_t *sizeOut) {
     if (!s_ime_map) {
         const esp_partition_t *part = esp_partition_find_first(
@@ -45,6 +49,16 @@ static const uint8_t *imePartitionMapped(size_t *sizeOut) {
         }
         s_ime_map = (const uint8_t *)map;
         s_ime_map_size = part->size;
+        if (part->size >= 0x400000u) {
+            s_ime_pinyin_size = IME_PINYIN_BIN_SIZE_OLD;  /* 旧 4MB 布局：全量表 */
+            s_ime_lf_offset  = IME_LF_BASE_OFFSET_OLD;
+        } else {
+            s_ime_pinyin_size = IME_COMPACT_PAD;          /* 新 1MB 布局：精简表 */
+            s_ime_lf_offset  = IME_COMPACT_PAD;
+        }
+        ESP_LOGI(IME_TAG, "ime partition %uKB -> %s layout",
+                 (unsigned)(part->size / 1024),
+                 part->size >= 0x400000u ? "full-4M" : "compact-1M");
     }
     *sizeOut = s_ime_map_size;
     return s_ime_map;
@@ -1414,7 +1428,7 @@ bool IME::begin() {
 #if PJOURNAL_IME_ENABLE_PINYIN
     size_t mappedSize = 0;
     _blob = imePartitionMapped(&mappedSize);
-    _blobSize = IME_PINYIN_BIN_SIZE;   /* 布局常量，不依赖分区实际尺寸 */
+    _blobSize = s_ime_pinyin_size;   /* 布局运行时分派：旧 4MB=全量表，新 1MB=精简表 */
 #else
     _blob = nullptr;
     _blobSize = 0;
@@ -2348,11 +2362,11 @@ void IME::loadLfDict() {
     if (_lfBlob) return;
     size_t mappedSize = 0;
     if (!imePartitionMapped(&mappedSize) ||
-        mappedSize < IME_LF_BASE_OFFSET + IME_LF_BIN_SIZE) {
+        mappedSize < s_ime_lf_offset + IME_LF_BIN_SIZE) {
         _lfBlob = nullptr;
         return;
     }
-    _lfBlob = s_ime_map + IME_LF_BASE_OFFSET;
+    _lfBlob = s_ime_map + s_ime_lf_offset;
     size_t total = IME_LF_BIN_SIZE;
     if (total < 1354 + 16) { _lfBlob = nullptr; return; }
 
