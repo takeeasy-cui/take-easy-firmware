@@ -38,9 +38,10 @@ extern "C" {
 /* ===================== 分类与应用入口映射 ===================== */
 
 typedef enum {
-    GC_CAT_AVGR = 0,   /* 推理 AVG（逆转裁判等；宿主引擎 avg_engine） */
-    GC_CAT_TEXT,       /* 通用文字游戏（自带极简脚本） */
-    GC_CAT_BBK,        /* 步步高电子词典游戏（伏魔记） */
+    GC_CAT_AVGR = 0,   /* 推理 AVG（逆转裁判等；宿主引擎 avg_engine）【M6 回归位，M2 起移出入口】 */
+    GC_CAT_TEXT,       /* 对话游戏（story_kernel + 对话框流渲染，text- 前缀） */
+    GC_CAT_NOVEL,      /* 互动小说（story_kernel + book_layout 分页渲染，novel- 前缀） */
+    GC_CAT_BBK,        /* 步步高电子词典游戏（伏魔记）【M5，暂移出入口】 */
 } gc_cat_t;
 
 /* 分类 → TF 卡包前缀（命名规则的唯一事实来源）。 */

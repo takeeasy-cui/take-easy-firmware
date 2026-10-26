@@ -77,6 +77,7 @@ const char* gc_cat_prefix(gc_cat_t cat) {
     switch (cat) {
     case GC_CAT_AVGR: return "avgr";
     case GC_CAT_TEXT: return "text";
+    case GC_CAT_NOVEL: return "novel";
     case GC_CAT_BBK:  return "bbk";
     default:          return "";
     }

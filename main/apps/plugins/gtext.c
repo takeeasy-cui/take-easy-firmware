@@ -1,18 +1,17 @@
 /*
- * gtext.c — 通用文字游戏插件（text-<name>.zip，包根 story.txt）。
+ * gtext.c — 对话游戏插件（text-<name>.zip / 目录，包根 story.txt）。
  *
- * 极简剧本格式（一行一令；# 注释；无需编译）：
- *   * title 游戏名
- *   * bg image.png          背景图（可选，包内文件）
- *   * name 说话人            （下一句的名牌；省略=旁白）
- *   * > 正文文本             （冒号后为打字机正文）
- *   * choice a|b|c           分支选项（按钮竖排）
- *   * goto 标签
- *   * label 标签
- *   * set 标志 / * if 标签 g 目标 / * ifnot 标签 g 目标
- *   * end                    结局页
+ * Story Engine v1 的 game 渲染端（M2，2026-10-26）：脚本执行共用
+ * main/game/story_kernel.c，本文件只做渲染与交互——背景/立绘/对话框/
+ * 打字机/选项/结局页，全走 game_host_ui 共享原语。
  *
- * 全部界面走 game_host_ui 共享原语（观感与推理游戏一致）。
+ * 与旧版 gtext 的差别（用户拍板：游戏出口固定、便于大量移植）：
+ *  - 执行内核共用（novel- 同一内核），变量四则/条件跳/直跳式选项/多结局；
+ *  - 立绘 3 槽（* char），透明 PNG 或 .g8（解码器沿 avgr 冻结实现搬用）；
+ *  - * ending 文案页 + flag 结局收集；存档向后兼容旧 .gtsave。
+ *
+ * Script grammar: see story_kernel.h. Rendering only; the shared interpreter
+ * lives in main/game/story_kernel.c.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,267 +29,286 @@
 #pragma GCC diagnostic ignored "-Wformat-truncation"
 
 #include "game_core.h"
+#include "story_kernel.h"
+
+#include "avg_asset.h"
 
 #define GTEXT_DIALOG_TOP  840
-#define GTEXT_LH          44
-#define GTEXT_CHOICE_Y0   700
-#define GTEXT_CHOICE_H    64
+#define GTEXT_LH           44
+#define GTEXT_BG_W         684
+#define GTEXT_BG_H         840
+#define GTEXT_CH_W         470
+#define GTEXT_CH_H         640
+#define GTEXT_CHOICE_Y0    640
+#define GTEXT_CHOICE_H     64
+#define GTEXT_CHOICE_STEP  72
 
-/* ===================== 剧本数据（包根 story.txt 整读 PSRAM） ===================== */
-typedef struct { char* text; size_t len; int lines; } gtext_script_t;
+/* ===================== 状态 ===================== */
 
 typedef struct {
-    gtext_script_t script;
-    int      pc;                 /* 当前行号（0 基；存档字段） */
-    int      shown;              /* 打字机字节进度 */
-    char     title[96];
-    char     name[48];
-    char     text[640];
-    char     bg[96];
-    char     bg_key[96];         /* 已解码背景名（变更才重解） */
-    unsigned bg_w, bg_h;        /* 解码图像实际尺寸 */
-    uint8_t* bg_gray;            /* 684×700 会话缓冲（launch 分配/quit 释放） */
-    int64_t  last_ms;
-    bool     choosing;
-    char     choices[4][168];
-    int      choice_count;
-    char     flags[8][24];
-    char     save_path[192];
+    sk_state_t*  sk;                       /* PSRAM（脚本+变量+label 表） */
+    avg_assets_t assets;                   /* bg/char 灰度+蒙版 LRU 缓存 */
+    sk_out_t     cur;                      /* 最近暂停事件 */
+    int          shown;                    /* 打字机字节进度 */
+    bool         choosing;
+    bool         ended;                    /* 结局终页 */
+    char         save_path[192];
+    uint64_t     gen;                      /* assets 代次（场景重建依据） */
+    int64_t      last_ms;
 } gtext_state_t;
 
-/* gtext_decode：book_image 管线薄封装（背景 684×700 灰度，保比例）。 */
-static bool gtext_decode(gc_ctx_t* g, const char* file, uint8_t* out, size_t cap,
-                         unsigned* w, unsigned* h);
+/* ===================== 图片解码注入（沿 avgr 冻结实现，竖屏几何） =====================
+ *  - bg：contain 684×840（等比、不裁切、16 档量化）；
+ *  - char：contain 470×640（底对齐由 paint 决定）；
+ *  - .g8 快路径（转换器预烘焙 30ms vs PNG 500ms）+ PNG 兼容回退。 */
 
-/* 行访问器 + 前缀判定。 */
-static char* line_at(gtext_state_t* s, int index) {
-    if (index < 0 || index >= s->script.lines) return NULL;
-    char* p = s->script.text;
-    for (int i = 0; i < index; ++i) { p = strchr(p, '\n'); if (!p) return NULL; ++p; }
-    return p;
-}
-static bool line_is(char* l, const char* tag, char** arg) {
-    if (!l || strncmp(l, tag, strlen(tag)) != 0) return false;
-    *arg = l + strlen(tag);
-    while (**arg == ' ') ++*arg;
-    char* nl = strchr(*arg, '\n');
-    if (nl) *nl = 0;                       /* 就地截断（读态安全：text 可变） */
-    return true;
-}
-static void copy_trim(char* dst, size_t cap, char* src, size_t n) {
-    size_t take = n < cap - 1 ? n : cap - 1;
-    memcpy(dst, src, take); dst[take] = 0;
-    char* r = strchr(dst, '\r'); if (r) *r = 0;
+static void quantize16(uint8_t* px, size_t n) {
+    for (size_t i = 0; i < n; ++i) px[i] = (uint8_t)(px[i] & 0xF0);
 }
 
-static bool load_script(gtext_state_t* s, const char* path) {
+static bool g8_load(const char* path, unsigned max_w, unsigned max_h,
+                    uint8_t* out, uint8_t** mask, unsigned* w, unsigned* h) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n <= 0 || n > 2 * 1024 * 1024) { fclose(f); return false; }
-    s->script.text = (char*)heap_caps_malloc((size_t)n + 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s->script.text) { fclose(f); return false; }
-    size_t got = fread(s->script.text, 1, (size_t)n, f);
+    uint8_t hdr[10];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) ||
+        memcmp(hdr, "EVG8\x01", 5) != 0) {
+        fclose(f);
+        return false;
+    }
+    unsigned gw = hdr[5] | ((unsigned)hdr[6] << 8);
+    unsigned gh = hdr[7] | ((unsigned)hdr[8] << 8);
+    bool has_mask = (hdr[9] & 1) != 0;
+    if (!gw || !gh || (uint64_t)gw * gh > (uint64_t)max_w * max_h) {
+        fclose(f);
+        return false;
+    }
+    if (fread(out, 1, (size_t)gw * gh, f) != (size_t)gw * gh) {
+        fclose(f);
+        return false;
+    }
+    uint8_t* m = NULL;
+    if (has_mask) {
+        size_t bytes = (size_t)gh * ((gw + 7) / 8);
+        m = (uint8_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!m || fread(m, 1, bytes, f) != bytes) {
+            if (m) heap_caps_free(m);
+            fclose(f);
+            return false;
+        }
+    }
     fclose(f);
-    s->script.text[got] = '\n'; s->script.text[got + 1] = 0;
-    s->script.len = got + 1;
-    s->script.lines = 0;
-    for (size_t i = 0; i < s->script.len; ++i)
-        if (s->script.text[i] == '\n') ++s->script.lines;
+    *w = gw; *h = gh;
+    if (mask) *mask = m;
+    else if (m) heap_caps_free(m);
     return true;
 }
 
-static bool flag_has(gtext_state_t* s, const char* name) {
-    for (int i = 0; i < 8; ++i) if (!strcmp(s->flags[i], name)) return true;
+static bool gtext_image_decode(const char* path, unsigned max_w, unsigned max_h,
+                               uint8_t* out, uint8_t** mask, unsigned* w, unsigned* h) {
+    if (mask) *mask = NULL;
+    /* .png 引用时伴生同名 .g8 优先（转换器烘焙）。 */
+    char g8path[296];
+    const char* ext = strrchr(path, '.');
+    if (ext && !strcmp(ext, ".png") && (size_t)(ext - path) + 3 < sizeof(g8path)) {
+        snprintf(g8path, sizeof(g8path), "%.*s.g8", (int)(ext - path), path);
+        FILE* probe = fopen(g8path, "rb");
+        if (probe) {
+            fclose(probe);
+            path = g8path;
+            ext = ".g8";
+        }
+    }
+    if (ext && !strcmp(ext, ".g8"))
+        return g8_load(path, max_w, max_h, out, mask, w, h);
+    unsigned ow = 0, oh = 0;
+    if (!book_image_file_dimensions(path, true, &ow, &oh) || !ow || !oh) return false;
+    unsigned fw = max_w, fh = (unsigned)((uint64_t)oh * max_w / ow);
+    if (fh > max_h || fh == 0) {
+        fh = max_h;
+        fw = (unsigned)((uint64_t)ow * max_h / oh);
+    }
+    if (!fw || !fh) return false;
+    if (!book_image_file_grayscale(path, true, fw, fh, out)) return false;
+    quantize16(out, (size_t)fw * fh);
+    *w = fw; *h = fh;
+    return true;
+}
+
+/* 包内素材路径多级回退：images/<sub>/<名> → images/<名> → <名>。
+ * 名无扩展名时自动试 .png / .g8（脚本书写友好；g8 由解码器快路径接手）。 */
+static bool resolve_asset(const gc_ctx_t* g, const char* sub, const char* name,
+                          char* out, size_t cap) {
+    char base[128];
+    snprintf(base, sizeof(base), "%s", name);
+    bool has_ext = strrchr(base, '.') != NULL && strlen(strrchr(base, '.')) <= 4;
+    static const char* exts[3] = { ".png", ".g8", "" };
+    int ext_first = has_ext ? 2 : 0;        /* 已带扩展名只试原样 */
+    char tries[3][256];
+    for (int e = ext_first; e < 3; ++e) {
+        const char* ext = has_ext ? "" : exts[e];
+        snprintf(tries[0], sizeof(tries[0]), "%s/images/%s/%s%s", g->pkg_dir, sub, base, ext);
+        snprintf(tries[1], sizeof(tries[1]), "%s/images/%s%s", g->pkg_dir, base, ext);
+        snprintf(tries[2], sizeof(tries[2]), "%s/%s%s", g->pkg_dir, base, ext);
+        for (int t = 0; t < 3; ++t) {
+            FILE* f = fopen(tries[t], "rb");
+            if (f) { fclose(f); snprintf(out, cap, "%s", tries[t]); return true; }
+        }
+    }
     return false;
 }
-static void flag_set(gtext_state_t* s, const char* name) {
-    if (flag_has(s, name)) return;
-    for (int i = 0; i < 8; ++i) if (!s->flags[i][0]) {
-        snprintf(s->flags[i], sizeof(s->flags[i]), "%s", name);
-        return;
-    }
-}
-static int find_label(gtext_state_t* s, const char* name) {
-    for (int i = 0; i < s->script.lines; ++i) {
-        char* l = line_at(s, i); char* arg;
-        if (line_is(l, "* label", &arg) && !strcmp(arg, name)) return i + 1;
-    }
-    return -1;
-}
 
-/* ===================== 走剧本（到下一句正文/选项/结局） ===================== */
-static void run_to_pause(gc_ctx_t* g, gtext_state_t* s) {
-    s->choosing = false; s->choice_count = 0; s->text[0] = 0; s->name[0] = 0;
-    while (s->pc < s->script.lines) {
-        char* l = line_at(s, s->pc); char* arg;
-        if (!l) break;
-        if (line_is(l, "* title", &arg)) { snprintf(s->title, sizeof(s->title), "%s", arg); s->pc++; continue; }
-        if (line_is(l, "* bg", &arg))    { snprintf(s->bg, sizeof(s->bg), "%s", arg); s->pc++; g->area = (EpdRect){0,0,684,GTEXT_DIALOG_TOP}; g->want_full = false; continue; }
-        if (line_is(l, "* name", &arg))  { snprintf(s->name, sizeof(s->name), "%s", arg); s->pc++; continue; }
-        if (line_is(l, "* set", &arg))   { flag_set(s, arg); s->pc++; continue; }
-        if (line_is(l, "* goto", &arg))  { int t = find_label(s, arg); if (t >= 0) s->pc = t; else s->pc++; continue; }
-        if (line_is(l, "* ifnot", &arg) || line_is(l, "* if", &arg)) {   /* 长 tag 先试，防前缀误配 */
-            bool not = l[3] == 'n';
-            char name[24]; char* sp = strchr(arg, ' ');
-            if (sp) {
-                size_t n = (size_t)(sp - arg);
-                copy_trim(name, sizeof(name), arg, n);
-                char* target = sp + 1; while (*target == ' ') ++target;
-                bool hit = flag_has(s, name) != not;
-                int t = hit ? find_label(s, target) : -1;
-                s->pc = hit && t >= 0 ? t : s->pc + 1;
-            } else s->pc++;
-            continue;
-        }
-        if (line_is(l, "* label", &arg)) { s->pc++; continue; }
-        if (line_is(l, "* choice", &arg)) {
-            char* tok = arg;
-            while (*tok && s->choice_count < 4) {
-                char* bar = strchr(tok, '|');
-                size_t n = bar ? (size_t)(bar - tok) : strlen(tok);
-                copy_trim(s->choices[s->choice_count++], sizeof(s->choices[0]), tok, n);
-                if (!bar) break;
-                tok = bar + 1;
-            }
-            s->choosing = s->choice_count > 0;
-            s->pc++;
-            s->shown = 0; s->last_ms = 0;
-            return;
-        }
-        if (line_is(l, "* end", &arg)) { (void)arg; s->pc = s->script.lines + 1; return; }
-        if (!strncmp(l, "#", 1)) { s->pc++; continue; }
-        if (!strncmp(l, "* >", 3)) {          /* 正文：* > 文本 */ 
-            copy_trim(s->text, sizeof(s->text), l + 3, strlen(l + 3));
-            s->pc++; s->shown = 0; s->last_ms = 0;
-            return;
-        }
-        if (!strncmp(l, ">", 1)) {            /* 正文：> 文本（推荐写法） */
-            copy_trim(s->text, sizeof(s->text), l + 1, strlen(l + 1));
-            s->pc++; s->shown = 0; s->last_ms = 0;
-            return;
-        }
-        s->pc++;                              /* 其余空行/未知行跳过（宽容脚本） */
+/* ===================== 走剧本（到下一暂停点） ===================== */
+
+static void run_to_pause(gtext_state_t* s) {
+    s->choosing = false;
+    s->ended = false;
+    for (;;) {
+        sk_event_t ev = sk_step(s->sk, &s->cur);
+        if (ev == SK_EV_TEXT) { s->shown = 0; s->last_ms = 0; return; }
+        if (ev == SK_EV_CHOICE) { s->choosing = true; s->shown = 0; return; }
+        if (ev == SK_EV_END || ev == SK_EV_EOF) { s->ended = true; return; }
+        /* SK_EV_NONE：副作用已消化，继续 */
     }
 }
 
-/* ===================== 存档（pc + flags，单行文本） ===================== */
+/* ===================== 存档 ===================== */
+
 static void save(gtext_state_t* s) {
     if (!s->save_path[0]) return;
     FILE* f = fopen(s->save_path, "w");
     if (!f) return;
-    fprintf(f, "%d", s->pc);
-    for (int i = 0; i < 8; ++i) if (s->flags[i][0]) fprintf(f, " %s", s->flags[i]);
+    char buf[512];
+    sk_save(s->sk, -1, buf, sizeof(buf));
+    fprintf(f, "%s\n", buf);
     fclose(f);
 }
 static bool restore(gtext_state_t* s) {
     FILE* f = fopen(s->save_path, "r");
     if (!f) return false;
-    int pc = -1;
-    if (fscanf(f, "%d", &pc) != 1 || pc < 0) { fclose(f); return false; }
-    char name[24];
-    while (fscanf(f, "%23s", name) == 1) flag_set(s, name);
+    char line[768];
+    if (!fgets(line, sizeof(line), f)) { fclose(f); return false; }
     fclose(f);
-    s->pc = pc;
+    int page = -1;
+    if (!sk_restore(s->sk, line, &page)) return false;
+    run_to_pause(s);                        /* 从存档行重放到暂停点 */
     return true;
 }
 
 /* ===================== paint ===================== */
+
 static void draw_line(void* user, const char* line, int y) {
     ui_text_vc((uint8_t*)user, 48, y, 28, line, EPD_DRAW_ALIGN_LEFT, false);
 }
-static void paint(gc_ctx_t* g, uint8_t* fb) {
-    gtext_state_t* s = (gtext_state_t*)g->state;
-    if (!s) { gc_ui_nopkg(fb, "文字游戏", GC_CAT_TEXT); return; }
-    if (s->pc > s->script.lines) {            /* * end 结局 */
-        ui_clear_page(fb);
-        ui_text_vc(fb, 342, 500, 60, "完", EPD_DRAW_ALIGN_CENTER, false);
-        ui_text_vc(fb, 342, 620, 24, s->title, EPD_DRAW_ALIGN_CENTER, false);
-        ui_text_vc(fb, 342, 1120, 18, "点按屏幕返回标题", EPD_DRAW_ALIGN_CENTER, false);
-        return;
-    }
-    if (s->choosing) {                        /* 选择页独立整页（先于场景绘制，省一次重画） */
-        ui_clear_page(fb);
-        gc_ui_dialog_frame(fb, 520);
-        if (s->name[0]) gc_ui_name_tag(fb, 520, s->name);
-        ui_text_vc(fb, 342, 584, 22, s->text[0] ? s->text : "请选择", EPD_DRAW_ALIGN_CENTER, false);
-        for (int i = 0; i < s->choice_count; ++i)
-            gc_ui_button(fb, (EpdRect){120, 660 + i * 80, 444, 64}, s->choices[i], false);
-        return;
-    }
+
+static void paint_scene(gtext_state_t* s, gc_ctx_t* g, uint8_t* fb) {
     ui_clear_page(fb);
-    if (s->bg[0] && s->bg_gray) {
-        /* 背景缓存：文件名变更才重新解码（会话级，避免每帧重复 IO）。 */
-        if (strcmp(s->bg_key, s->bg) != 0) {
-            if (gtext_decode(g, s->bg, s->bg_gray, 684u * 700u, &s->bg_w, &s->bg_h))
-                snprintf(s->bg_key, sizeof(s->bg_key), "%s", s->bg);
-            else s->bg_key[0] = 0;
+    sk_state_t* sk = s->sk;
+
+    /* 背景（684×840 区域内 contain；缺图画占位）。 */
+    if (sk->bg[0]) {
+        char path[256];
+        if (resolve_asset(g, "bg", sk->bg, path, sizeof(path))) {
+            unsigned w = 0, h = 0;
+            const uint8_t* gray = avg_assets_get(&s->assets, path, GTEXT_BG_W, GTEXT_BG_H,
+                                                 &w, &h, (uint64_t)g->app->now_ms, NULL);
+            if (gray) gc_ui_blit_gray(fb, gray, w, h, 0, 0, GTEXT_BG_W, GTEXT_BG_H);
+            else gc_ui_missing(fb, sk->bg, 0, 0, GTEXT_BG_W, GTEXT_BG_H);
+        } else {
+            gc_ui_missing(fb, sk->bg, 0, 0, GTEXT_BG_W, GTEXT_BG_H);
         }
-        if (s->bg_key[0])
-            gc_ui_blit_gray(fb, s->bg_gray, s->bg_w, s->bg_h, 0, 0, 684, GTEXT_DIALOG_TOP);
-        else gc_ui_missing(fb, s->bg, 0, 0, 684, GTEXT_DIALOG_TOP);
+        sk->bg_dirty = false;
     }
+
+    /* 立绘 3 槽（底对齐对话框；L/C/R 横向落位；含透明蒙版）。 */
+    if (sk->char_dirty) {
+        for (int i = 0; i < 3; ++i) {
+            if (!sk->chars[i][0]) continue;
+            char path[256];
+            if (!resolve_asset(g, "char", sk->chars[i], path, sizeof(path))) continue;
+            unsigned w = 0, h = 0;
+            const uint8_t* mask = NULL;
+            const uint8_t* gray = avg_assets_get(&s->assets, path, GTEXT_CH_W, GTEXT_CH_H,
+                                                 &w, &h, (uint64_t)g->app->now_ms, &mask);
+            if (!gray) continue;
+            int x = sk->char_pos[i] == 0 ? 8
+                  : sk->char_pos[i] == 2 ? (int)(684 - w - 8)
+                  : (int)((684 - w) / 2);
+            int y = GTEXT_DIALOG_TOP - (int)h;
+            gc_ui_blit_gray_a(fb, gray, w, h, mask, x, y, 684, GTEXT_DIALOG_TOP);
+        }
+        sk->char_dirty = false;
+    }
+
     gc_ui_dialog_frame(fb, GTEXT_DIALOG_TOP);
-    gc_ui_name_tag(fb, GTEXT_DIALOG_TOP, s->name);
-    gc_ui_typewrap(s->text, s->shown, 4, 20, draw_line, fb, 886, GTEXT_LH);
-    if (s->text[0] && (size_t)s->shown >= strlen(s->text))
+    gc_ui_name_tag(fb, GTEXT_DIALOG_TOP, s->cur.name);
+    gc_ui_typewrap(s->cur.text, s->shown, 4, 20, draw_line, fb, 886, GTEXT_LH);
+    if (s->cur.text[0] && (size_t)s->shown >= strlen(s->cur.text))
         gc_ui_wait_cursor(fb, 624, 1088);
 }
 
-/* gtext_decode：薄包一下 book_image 管线（launch 里为 bg_gray 分配 PSRAM）。 */
-static bool gtext_decode(gc_ctx_t* g, const char* file, uint8_t* out, size_t cap,
-                         unsigned* w, unsigned* h) {
-    char path[224];
-    snprintf(path, sizeof(path), "%s/%s", g->pkg_dir, file);
-    unsigned ow = 0, oh = 0;
-    if (!book_image_file_dimensions(path, true, &ow, &oh) || !ow || !oh) return false;
-    unsigned fit_w = 684, fit_h = (unsigned)((uint64_t)oh * fit_w / ow);
-    if (fit_h > 700) { fit_h = 700; fit_w = (unsigned)((uint64_t)ow * fit_h / oh); }
-    if ((size_t)fit_w * fit_h > cap) return false;
-    if (!book_image_file_grayscale(path, true, fit_w, fit_h, out)) return false;
-    *w = fit_w; *h = fit_h;
-    return true;
+static void paint(gc_ctx_t* g, uint8_t* fb) {
+    gtext_state_t* s = (gtext_state_t*)g->state;
+    if (!s) { gc_ui_nopkg(fb, "对话游戏", GC_CAT_TEXT); return; }
+
+    if (s->ended) {                         /* 结局页（* ending 文案或无名 * end） */
+        ui_clear_page(fb);
+        ui_text_vc(fb, 342, 480, 72, "完", EPD_DRAW_ALIGN_CENTER, false);
+        if (s->cur.text[0])
+            ui_text_vc(fb, 342, 600, 26, s->cur.text, EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 342, 660, 22, s->sk->title, EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 342, 1118, 18, "点按屏幕重新开始 · 中长按退出", EPD_DRAW_ALIGN_CENTER, false);
+        return;
+    }
+    if (s->choosing) {                       /* 选择页独立整页（≤6 项竖排） */
+        ui_clear_page(fb);
+        gc_ui_dialog_frame(fb, 520);
+        if (s->cur.name[0]) gc_ui_name_tag(fb, 520, s->cur.name);
+        if (s->cur.text[0])
+            ui_text_vc(fb, 342, 584, 22, s->cur.text, EPD_DRAW_ALIGN_CENTER, false);
+        for (int i = 0; i < s->cur.choice_count; ++i)
+            gc_ui_button(fb, (EpdRect){120, GTEXT_CHOICE_Y0 + i * GTEXT_CHOICE_STEP,
+                                       444, GTEXT_CHOICE_H}, s->cur.choice_text[i], false);
+        return;
+    }
+    paint_scene(s, g, fb);
 }
 
 /* ===================== 输入 / tick ===================== */
+
 static gc_ev_t ev_area(gc_ctx_t* g, EpdRect a) { g->area = a; g->want_full = false; return GC_EV_DIRTY; }
 
 static gc_ev_t input(gc_ctx_t* g, const ui_gesture_event_t* ev) {
     gtext_state_t* s = (gtext_state_t*)g->state;
     if (ev->type != UI_GESTURE_TAP) return GC_EV_NONE;
-    if (s->pc > s->script.lines) {            /* 结局→回标题 */
-        s->pc = 0; s->flags[0][0] = 0; s->flags[1][0] = 0; s->flags[2][0] = 0;
-        s->flags[3][0] = 0; s->flags[4][0] = 0; s->flags[5][0] = 0; s->flags[6][0] = 0; s->flags[7][0] = 0;
-        run_to_pause(g, s);
+
+    if (s->ended) {                         /* 结局 → 回标题（重跑） */
+        sk_restart(s->sk);
+        run_to_pause(s);
         return ev_area(g, (EpdRect){0, 0, 684, 1216});
     }
     if (s->choosing) {
-        for (int i = 0; i < s->choice_count; ++i) {
-            EpdRect r = {120, 600 + i * 80, 444, 64};
+        for (int i = 0; i < s->cur.choice_count; ++i) {
+            EpdRect r = {120, GTEXT_CHOICE_Y0 + i * GTEXT_CHOICE_STEP, 444, GTEXT_CHOICE_H};
             if (ui_rect_hit(r, ev->x0, ev->y0)) {
-                char mark[32];
-                snprintf(mark, sizeof(mark), "c%d", i);
-                flag_set(s, mark);            /* 选项记标志：脚本可用 if c0 g 分支 */
-                s->choosing = false;
-                run_to_pause(g, s);
+                sk_choose(s->sk, i);
+                run_to_pause(s);
+                save(s);
                 return ev_area(g, (EpdRect){0, 0, 684, 1216});
             }
         }
         return GC_EV_NONE;
     }
-    if ((size_t)s->shown < strlen(s->text)) {  /* 打字中点按=整句直出 */
-        s->shown = (int)strlen(s->text);
+    if ((size_t)s->shown < strlen(s->cur.text)) {   /* 打字中点按=整句直出 */
+        s->shown = (int)strlen(s->cur.text);
         return ev_area(g, (EpdRect){0, GTEXT_DIALOG_TOP, 684, 1216 - GTEXT_DIALOG_TOP});
     }
-    run_to_pause(g, s);
+    run_to_pause(s);
     save(s);
     return ev_area(g, (EpdRect){0, 0, 684, 1216});
 }
 
 static gc_ev_t key(gc_ctx_t* g, int k) {
-    gtext_state_t* s = (gtext_state_t*)g->state;
     if (k != UI_KEY_1) return GC_EV_NONE;
     ui_gesture_event_t tap = { .type = UI_GESTURE_TAP, .x0 = 342, .y0 = 900 };
     return input(g, &tap);
@@ -298,12 +316,12 @@ static gc_ev_t key(gc_ctx_t* g, int k) {
 
 static gc_ev_t tick(gc_ctx_t* g) {
     gtext_state_t* s = (gtext_state_t*)g->state;
-    if (s->choosing || s->pc > s->script.lines) return GC_EV_NONE;
-    size_t total = strlen(s->text);
+    if (s->choosing || s->ended) return GC_EV_NONE;
+    size_t total = strlen(s->cur.text);
     if ((size_t)s->shown >= total || total == 0) return GC_EV_NONE;
     if (g->app->now_ms - s->last_ms < 60) return GC_EV_NONE;
     s->last_ms = g->app->now_ms;
-    unsigned char c0 = (unsigned char)s->text[s->shown];
+    unsigned char c0 = (unsigned char)s->cur.text[s->shown];
     s->shown += c0 & 0x80 ? ((c0 & 0xf0) == 0xe0 ? 3 : 2) : 1;
     g->area = (EpdRect){0, GTEXT_DIALOG_TOP, 684, 1216 - GTEXT_DIALOG_TOP};
     g->want_full = false;
@@ -311,36 +329,46 @@ static gc_ev_t tick(gc_ctx_t* g) {
 }
 
 /* ===================== 生命周期 ===================== */
+
+static void quit(gc_ctx_t* g);              /* 前向：launch 失败自清用 */
+
 static bool launch(gc_ctx_t* g, const char* title_arg) {
     (void)title_arg;
     gtext_state_t* s = (gtext_state_t*)calloc(1, sizeof(gtext_state_t));
     if (!s) return false;
     g->state = s;
-    if (!g->pkg_dir[0]) { snprintf(s->title, sizeof(s->title), "文字游戏"); return true; }
-    char path[224];
+    if (!g->pkg_dir[0]) return true;        /* 无包：paint 画引导页 */
+
+    s->sk = (sk_state_t*)heap_caps_calloc(1, sizeof(sk_state_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s->sk) return false;
+
+    char path[256];
     snprintf(path, sizeof(path), "%s/story.txt", g->pkg_dir);
-    if (!load_script(s, path)) return false;
-    s->bg_gray = (uint8_t*)heap_caps_malloc(684u * 700u, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!sk_load(s->sk, path)) { quit(g); return false; }   /* 失败自清防泄漏 */
     snprintf(s->save_path, sizeof(s->save_path), "%s/.gtsave", g->pkg_dir);
-    /* 开场跑到第一句（吸收头部 * title/bg）；随后若有存档则跳到存档点。 */
-    run_to_pause(g, s);
-    if (!s->title[0]) snprintf(s->title, sizeof(s->title), "%s", g->pkg_name);
-    if (restore(s)) { s->shown = 0; run_to_pause(g, s); }
+
+    avg_assets_init(&s->assets);
+    avg_assets_set_decoder(gtext_image_decode);
+
+    run_to_pause(s);
+    if (!s->sk->title[0]) snprintf(s->sk->title, sizeof(s->sk->title), "%s", g->pkg_name);
+    if (restore(s)) { s->shown = 0; run_to_pause(s); }
     return true;
 }
 
 static void quit(gc_ctx_t* g) {
     gtext_state_t* s = (gtext_state_t*)g->state;
     if (!s) return;
-    if (s->script.text) heap_caps_free(s->script.text);
-    if (s->bg_gray) heap_caps_free(s->bg_gray);
+    if (s->sk) { sk_free(s->sk); heap_caps_free(s->sk); }
+    avg_assets_release(&s->assets);
     free(s);
     g->state = NULL;
 }
 
 const gc_plugin_t gc_plugin_gtext = {
     .id = "text",
-    .name = "文字游戏",
+    .name = "对话游戏",
     .cat = GC_CAT_TEXT,
     .launch = launch,
     .quit = quit,

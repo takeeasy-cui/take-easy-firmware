@@ -117,15 +117,17 @@ idf_component_register(
         "apps/app_transfer.c"
         "apps/usb_storage.c"
         # GameCore 统一游戏内核（2026-10-18）：主引擎在 game/，插件在 apps/plugins/。
+        # Story Engine v1（2026-10-26 M2）：双出口共用 story_kernel 解释器——
+        #   text-*=对话游戏（gtext，对话框流）/ novel-*=互动小说（gnovel，book_layout 分页）。
+        #   推理 avgr / 步步高 gbbk 移出构建封存（M6/M5 回归；tag pre-story-purge）。
         "game/game_core.c"
         "game/game_pkg.c"
         "game/game_host_ui.c"
-        "apps/plugins/avgr.c"
+        "game/story_kernel.c"
         "apps/plugins/gtext.c"
-        "apps/plugins/gbbk.c"
-        "apps/app_avgr.c"
+        "apps/plugins/gnovel.c"
         "apps/app_gtext.c"
-        "apps/app_gbbk.c"
+        "apps/app_gnovel.c"
         "book/book_store.c"
         "book/book_progress.c"
         "book/book_history_backup.c"

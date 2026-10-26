@@ -1,0 +1,425 @@
+/*
+ * story_kernel.c — Story Engine v1 共用内核实现。
+ *
+ * 见 story_kernel.h 头注释（语法与语义）。实现要点：
+ *  - 脚本整读 PSRAM，行访问就地截断（text 可变内存，沿 gtext 做法）；
+ *  - label 表 load 时一次扫描，跳转 O(表长)；
+ *  - 未知 * 命令：串口一行日志后继续（宽容，试玩半成品包是常态）；
+ *  - 变量/标志未声明即建槽，读未声明变量=0（容忍脚本试错）。
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "esp_heap_caps.h"
+
+#include "story_kernel.h"
+
+/* ===================== 行访问与命令匹配 ===================== */
+
+static char* line_at(sk_state_t* sk, int index) {
+    if (index < 0 || index >= sk->lines) return NULL;
+    return sk->text + sk->offs[index];       /* 偏移表 O(1)：就地截断不影响寻址 */
+}
+
+/* 全词匹配：行以 "* cmd" 开头且 cmd 后是空白或行尾（防 "* ifgoto" 误配 "* if"）。
+ * 返回 true 时 arg 指向参数（已跳前导空格，行尾已就地截断）。 */
+static bool match(char* l, const char* cmd, char** arg) {
+    size_t n = strlen(cmd);
+    if (strncmp(l, cmd, n) != 0) return false;
+    char c = l[n];
+    if (c != ' ' && c != '\n' && c != 0) return false;
+    char* a = l + n;
+    while (*a == ' ') ++a;
+    char* nl = strchr(a, '\n');
+    if (nl) *nl = 0;                       /* 就地截断（offs 表寻址不受影响） */
+    char* r = strchr(a, '\r');
+    if (r) *r = 0;
+    *arg = a;
+    return true;
+}
+
+static void copy_trim(char* dst, size_t cap, const char* src, size_t n) {
+    size_t take = n < cap - 1 ? n : cap - 1;
+    memcpy(dst, src, take);
+    dst[take] = 0;
+}
+
+/* ===================== 变量 / 标志 / label ===================== */
+
+int sk_var_get(const sk_state_t* sk, const char* name) {
+    for (int i = 0; i < sk->vcount; ++i)
+        if (!strncmp(sk->vnames[i], name, SK_NAME_MAX)) return sk->vvals[i];
+    return 0;
+}
+
+void sk_var_set(sk_state_t* sk, const char* name, int16_t val) {
+    for (int i = 0; i < sk->vcount; ++i)
+        if (!strncmp(sk->vnames[i], name, SK_NAME_MAX)) { sk->vvals[i] = val; return; }
+    if (sk->vcount >= SK_MAX_VARS) return;              /* 满：丢弃（日志由 step 打） */
+    copy_trim(sk->vnames[sk->vcount], SK_NAME_MAX, name, strlen(name));
+    sk->vvals[sk->vcount] = val;
+    ++sk->vcount;
+}
+
+bool sk_flag_has(const sk_state_t* sk, const char* name) {
+    for (int i = 0; i < sk->fcount; ++i)
+        if (!strncmp(sk->fnames[i], name, SK_NAME_MAX)) return true;
+    return false;
+}
+
+void sk_flag_set(sk_state_t* sk, const char* name) {
+    if (sk_flag_has(sk, name)) return;
+    if (sk->fcount >= SK_MAX_FLAGS) return;
+    copy_trim(sk->fnames[sk->fcount], SK_NAME_MAX, name, strlen(name));
+    ++sk->fcount;
+}
+
+int sk_find_label(const sk_state_t* sk, const char* name) {
+    for (int i = 0; i < sk->lcount; ++i)
+        if (!strncmp(sk->labels[i].name, name, SK_NAME_MAX)) return sk->labels[i].line;
+    return -1;
+}
+
+static void goto_label(sk_state_t* sk, const char* name) {
+    int t = sk_find_label(sk, name);
+    if (t >= 0) sk->pc = t;
+    else printf("SK: label not found '%s'\n", name);
+}
+
+/* 操作数：纯数字取字面，否则查变量（未声明=0）。 */
+static int parse_val(const sk_state_t* sk, const char* tok) {
+    if (!*tok) return 0;
+    char* end = NULL;
+    long v = strtol(tok, &end, 10);
+    if (end && *end == 0) return (int)v;
+    return sk_var_get(sk, tok);
+}
+
+static bool cmp_op(int l, const char* op, int r) {
+    if (!strcmp(op, "==")) return l == r;
+    if (!strcmp(op, "!=")) return l != r;
+    if (!strcmp(op, ">"))  return l > r;
+    if (!strcmp(op, "<"))  return l < r;
+    if (!strcmp(op, ">=")) return l >= r;
+    if (!strcmp(op, "<=")) return l <= r;
+    return false;
+}
+
+/* ===================== 加载 / 释放 ===================== */
+
+bool sk_load(sk_state_t* sk, const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > SK_SCRIPT_MAX) { fclose(f); return false; }
+    sk->text = (char*)heap_caps_malloc((size_t)n + 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!sk->text) { fclose(f); return false; }
+    size_t got = fread(sk->text, 1, (size_t)n, f);
+    fclose(f);
+    sk->text[got] = '\n';
+    sk->text[got + 1] = 0;
+    sk->len = got + 1;
+    sk->lines = 0;
+    for (size_t i = 0; i < sk->len; ++i)
+        if (sk->text[i] == '\n') ++sk->lines;
+    /* 行偏移表（O(1) 行访问；就地截断换行不会破坏寻址——根治 gtext 旧 O(n) 走链错位）。 */
+    sk->offs = (int32_t*)heap_caps_calloc((size_t)sk->lines + 1, sizeof(int32_t),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!sk->offs) {
+        heap_caps_free(sk->text);
+        sk->text = NULL;
+        return false;
+    }
+    {
+        int li = 0;
+        sk->offs[li++] = 0;
+        for (size_t i = 0; i < sk->len; ++i)
+            if (sk->text[i] == '\n' && li < sk->lines) sk->offs[li++] = (int32_t)(i + 1);
+    }
+    /* label 表一次扫描（就地截断行尾，偏移表不受影响）。 */
+    sk->lcount = 0;
+    for (int i = 0; i < sk->lines && sk->lcount < SK_MAX_LABELS; ++i) {
+        char* l = line_at(sk, i);
+        char* arg;
+        if (l && match(l, "* label", &arg) && *arg)
+            copy_trim(sk->labels[sk->lcount].name, SK_NAME_MAX, arg, strlen(arg)),
+            sk->labels[sk->lcount++].line = i;
+    }
+    sk->pc = 0;
+    return true;
+}
+
+void sk_free(sk_state_t* sk) {
+    if (sk->text) heap_caps_free(sk->text);
+    if (sk->offs) heap_caps_free(sk->offs);
+    sk->text = NULL;
+    sk->offs = NULL;
+    sk->len = 0;
+    sk->lines = 0;
+    sk->pc = 0;
+    sk->lcount = 0;
+    sk->vcount = 0;
+    sk->fcount = 0;
+    sk->title[0] = 0;
+    sk->bg[0] = 0;
+    sk->bg_dirty = false;
+    sk->char_dirty = false;
+    sk->last_name[0] = 0;
+}
+
+/* ===================== set / 条件跳 ===================== */
+
+static void exec_set(sk_state_t* sk, char* arg) {
+    char* eq = strchr(arg, '=');
+    if (!eq) {                                      /* 旧式：* set 标志 */
+        if (*arg) sk_flag_set(sk, arg);
+        return;
+    }
+    *eq = 0;
+    char name[SK_NAME_MAX];
+    copy_trim(name, sizeof(name), arg, (size_t)(eq - arg));
+    char* rhs = eq + 1;
+    while (*rhs == ' ') ++rhs;
+    char t1[32] = {0}, t2[32] = {0};
+    char op = 0;
+    int fields = sscanf(rhs, "%31s %c %31s", t1, &op, t2);
+    int v;
+    if (fields >= 1) {
+        v = parse_val(sk, t1);
+        if (fields == 3) {
+            int r = parse_val(sk, t2);
+            if (op == '+') v += r;
+            else if (op == '-') v -= r;
+            else if (op == '*') v *= r;
+            else if (op == '/') v = r ? v / r : 0;
+        }
+    } else v = 0;
+    sk_var_set(sk, name, (int16_t)v);
+}
+
+static void exec_ifgoto(sk_state_t* sk, char* arg, bool invert) {
+    char name[SK_NAME_MAX] = {0}, op[8] = {0}, val[32] = {0}, target[SK_NAME_MAX] = {0};
+    if (sscanf(arg, "%23s %7s %31s %23s", name, op, val, target) != 4) return;
+    bool hit = cmp_op(sk_var_get(sk, name), op, parse_val(sk, val));
+    if (hit != invert) goto_label(sk, target);
+}
+
+static void exec_if_flag(sk_state_t* sk, char* arg, bool invert) {
+    /* 旧语法：* if 标志 g 目标（'g' 字面分隔）。 */
+    char name[SK_NAME_MAX] = {0}, g[4] = {0}, target[SK_NAME_MAX] = {0};
+    if (sscanf(arg, "%23s %3s %23s", name, g, target) != 3) return;
+    bool hit = sk_flag_has(sk, name);
+    if ((hit && !invert) || (!hit && invert)) goto_label(sk, target);
+}
+
+/* ===================== 选项 ===================== */
+
+static void parse_choice(sk_state_t* sk, char* arg, sk_out_t* out) {
+    sk->choice_direct = strstr(arg, "->") != NULL;
+    sk->choice_target[0][0] = 0;
+    out->choice_count = 0;
+    char* tok = arg;
+    while (*tok && out->choice_count < SK_MAX_CHOICES) {
+        char* bar = strchr(tok, '|');
+        size_t n = bar ? (size_t)(bar - tok) : strlen(tok);
+        if (n) {
+            char seg[192];
+            copy_trim(seg, sizeof(seg), tok, n);
+            if (sk->choice_direct) {
+                char* arrow = strstr(seg, "->");
+                if (arrow) {
+                    *arrow = 0;
+                    copy_trim(sk->choice_target[out->choice_count], SK_NAME_MAX,
+                              arrow + 2, strlen(arrow + 2));
+                    copy_trim(out->choice_text[out->choice_count],
+                              sizeof(out->choice_text[0]), seg, strlen(seg));
+                    ++out->choice_count;
+                } else {
+                    printf("SK: choice seg missing '->': '%s'\n", seg);
+                }
+            } else {
+                copy_trim(out->choice_text[out->choice_count],
+                          sizeof(out->choice_text[0]), seg, strlen(seg));
+                ++out->choice_count;
+            }
+        }
+        if (!bar) break;
+        tok = bar + 1;
+    }
+    if (out->choice_count == 0) out->choice_count = 1, strcpy(out->choice_text[0], "继续");
+}
+
+void sk_choose(sk_state_t* sk, int index) {
+    if (index < 0 || index >= SK_MAX_CHOICES) return;
+    if (sk->choice_direct) {
+        if (sk->choice_target[index][0]) goto_label(sk, sk->choice_target[index]);
+    } else {
+        char mark[8];
+        snprintf(mark, sizeof(mark), "c%d", index);
+        sk_flag_set(sk, mark);               /* 顺序继续（choice 行已消费） */
+    }
+}
+
+void sk_restart(sk_state_t* sk) {
+    sk->pc = 0;
+    sk->vcount = 0;
+    sk->fcount = 0;
+    sk->last_name[0] = 0;
+    sk->bg[0] = 0;
+    sk->bg_dirty = true;
+    sk->chars[0][0] = sk->chars[1][0] = sk->chars[2][0] = 0;
+    sk->char_dirty = true;
+}
+
+/* ===================== 步进 ===================== */
+
+sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
+    if (sk->pc >= sk->lines) { out->type = SK_EV_EOF; return SK_EV_EOF; }
+    char* l = line_at(sk, sk->pc);
+    if (!l) { out->type = SK_EV_EOF; return SK_EV_EOF; }
+
+    char* arg = NULL;
+    ++sk->pc;                               /* 默认本行已消费（跳转会改写 pc） */
+
+    if (*l == 0 || *l == '#' || *l == '\n' || *l == '\r') return SK_EV_NONE;
+
+    if (*l == '>') {                        /* 正文：继承粘性名牌 */
+        out->type = SK_EV_TEXT;
+        copy_trim(out->name, sizeof(out->name), sk->last_name, strlen(sk->last_name));
+        copy_trim(out->text, SK_TEXT_MAX, l + 1, strlen(l + 1));
+        return SK_EV_TEXT;
+    }
+
+    if (match(l, "* say", &arg)) {
+        char* sp = strchr(arg, ' ');
+        if (sp) {
+            *sp = 0;
+            copy_trim(out->name, sizeof(out->name), arg, strlen(arg));
+            char* t = sp + 1;
+            while (*t == ' ') ++t;
+            copy_trim(out->text, SK_TEXT_MAX, t, strlen(t));
+        } else {                            /* * say 文本（无名，罕见） */
+            out->name[0] = 0;
+            copy_trim(out->text, SK_TEXT_MAX, arg, strlen(arg));
+        }
+        copy_trim(sk->last_name, sizeof(sk->last_name), out->name, strlen(out->name));
+        out->type = SK_EV_TEXT;
+        return SK_EV_TEXT;
+    }
+
+    if (match(l, "* name", &arg)) {
+        copy_trim(sk->last_name, sizeof(sk->last_name), arg, strlen(arg));
+        return SK_EV_NONE;
+    }
+    if (match(l, "* title", &arg)) {
+        copy_trim(sk->title, sizeof(sk->title), arg, strlen(arg));
+        return SK_EV_NONE;
+    }
+    if (match(l, "* bg", &arg)) {
+        bool none = !strcmp(arg, "none");
+        copy_trim(sk->bg, sizeof(sk->bg), none ? "" : arg, none ? 0 : strlen(arg));
+        sk->bg_dirty = true;
+        return SK_EV_NONE;
+    }
+    if (match(l, "* char", &arg)) {
+        int slot = 0, focus = 0;
+        char file[96] = {0}, pos_c = 'C';
+        if (sscanf(arg, "%d %95s %c %d", &slot, file, &pos_c, &focus) >= 2 &&
+            slot >= 0 && slot < 3) {
+            bool none = !strcmp(file, "none");
+            copy_trim(sk->chars[slot], sizeof(sk->chars[slot]),
+                      none ? "" : file, none ? 0 : strlen(file));
+            sk->char_pos[slot] = (pos_c == 'L') ? 0 : (pos_c == 'R') ? 2 : 1;
+            sk->char_focus[slot] = focus != 0;
+            sk->char_dirty = true;
+        }
+        return SK_EV_NONE;
+    }
+    if (match(l, "* clear", &arg)) {
+        (void)arg;
+        for (int i = 0; i < 3; ++i) sk->chars[i][0] = 0;
+        sk->char_dirty = true;
+        return SK_EV_NONE;
+    }
+    if (match(l, "* hr", &arg)) {           /* 分隔线 → 一句正文 */
+        (void)arg;
+        out->type = SK_EV_TEXT;
+        out->name[0] = 0;
+        strcpy(out->text, "· · · · · ·");
+        return SK_EV_TEXT;
+    }
+    if (match(l, "* label", &arg)) return SK_EV_NONE;   /* 锚点行（表已建） */
+    if (match(l, "* goto", &arg)) { goto_label(sk, arg); return SK_EV_NONE; }
+    if (match(l, "* ifgoto", &arg)) { exec_ifgoto(sk, arg, false); return SK_EV_NONE; }
+    if (match(l, "* ifngoto", &arg)) { exec_ifgoto(sk, arg, true); return SK_EV_NONE; }
+    if (match(l, "* ifnot", &arg)) { exec_if_flag(sk, arg, true); return SK_EV_NONE; }
+    if (match(l, "* if", &arg)) { exec_if_flag(sk, arg, false); return SK_EV_NONE; }
+    if (match(l, "* set", &arg)) { exec_set(sk, arg); return SK_EV_NONE; }
+    if (match(l, "* choice", &arg)) {
+        parse_choice(sk, arg, out);
+        out->type = SK_EV_CHOICE;
+        return SK_EV_CHOICE;
+    }
+    if (match(l, "* ending", &arg)) {
+        out->type = SK_EV_END;
+        copy_trim(out->text, SK_TEXT_MAX, arg, strlen(arg));
+        sk->pc = sk->lines + 1;            /* 终态 */
+        return SK_EV_END;
+    }
+    if (match(l, "* end", &arg)) {
+        (void)arg;
+        out->type = SK_EV_END;
+        out->text[0] = 0;
+        sk->pc = sk->lines + 1;
+        return SK_EV_END;
+    }
+
+    if (*l == '*') {                        /* 未知命令：日志后宽容继续 */
+        char unk[64];
+        copy_trim(unk, sizeof(unk), l, strlen(l));
+        printf("SK: unknown cmd '%s'\n", unk);
+    }
+    return SK_EV_NONE;
+}
+
+/* ===================== 存档序列化 ===================== */
+
+size_t sk_save(const sk_state_t* sk, int extra_page, char* buf, size_t cap) {
+    size_t n = 0;
+    n += (size_t)snprintf(buf + n, cap - n, "%d", sk->pc);
+    if (extra_page >= 0) n += (size_t)snprintf(buf + n, cap - n, " P%d", extra_page);
+    for (int i = 0; i < sk->vcount && n + 2 < cap; ++i)
+        n += (size_t)snprintf(buf + n, cap - n, " %s=%d", sk->vnames[i], sk->vvals[i]);
+    for (int i = 0; i < sk->fcount && n + 2 < cap; ++i)
+        n += (size_t)snprintf(buf + n, cap - n, " %s", sk->fnames[i]);
+    return n;
+}
+
+bool sk_restore(sk_state_t* sk, const char* line, int* extra_page) {
+    if (extra_page) *extra_page = -1;
+    int pc = -1;
+    char tok[96];
+    const char* p = line;
+    if (sscanf(p, "%d", &pc) != 1 || pc < 0) return false;
+    sk->pc = pc;
+    while (*p && *p == ' ') ++p;
+    while (*p && *p != ' ') ++p;            /* 跳过 pc token */
+    while (sscanf(p, "%95s", tok) == 1) {
+        if (tok[0] == 'P' && (tok[1] >= '0' && tok[1] <= '9')) {
+            if (extra_page) *extra_page = atoi(tok + 1);
+        } else if (strchr(tok, '=')) {
+            char* eq = strchr(tok, '=');
+            *eq = 0;
+            sk_var_set(sk, tok, (int16_t)atoi(eq + 1));
+        } else {
+            sk_flag_set(sk, tok);           /* 旧 gtext 裸词=标志 */
+        }
+        p = strchr(p, ' ');
+        if (!p) break;
+        while (*p == ' ') ++p;
+    }
+    return true;
+}
