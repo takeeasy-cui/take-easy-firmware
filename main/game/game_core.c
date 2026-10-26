@@ -183,8 +183,17 @@ void gc_app_render(app_ctx_t* ctx, uint8_t* fb) {
     if (!s_active || !s_ctx.plugin) return;
     ui_clear_page(fb);                     /* 常态旋转下整屏清白＝物理整屏 */
     if (s_ctx.listing) {
-        gc_ui_pkg_list(fb, s_ctx.plugin->name, (const char* const*)s_ctx.pkg_list,
-                       s_ctx.pkg_count, s_ctx.plugin->cat);
+        /* pkg_list 是 char[8][48] 平面二维数组，gc_ui_pkg_list 要的是指针数组；
+         * 直接强转 (const char* const*) 会把包名字节当指针地址解引用——
+         * 2026-10-26 真机 LoadProhibited 实锤（"逆转裁判" UTF-8 首四字节被当
+         * 0xE9… 地址，list_label strncmp 即崩，进任一分类列表页必重启）。
+         * 栈上组装指针视图（8×4B=32B），逐行指向平面数组行。 */
+        const char* names[8];
+        int n = s_ctx.pkg_count > 8 ? 8 : s_ctx.pkg_count;
+        if (n < 0) n = 0;
+        for (int i = 0; i < n; ++i) names[i] = s_ctx.pkg_list[i];
+        gc_ui_pkg_list(fb, s_ctx.plugin->name, names, s_ctx.pkg_count,
+                       s_ctx.plugin->cat);
         return;
     }
     paint_plugin(s_ctx.plugin, fb);

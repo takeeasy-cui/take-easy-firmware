@@ -161,22 +161,29 @@ esp_err_t book_store_delete(const char* path, bool* removed) {
     const char* root;
     const char* name;
     size_t selected_len = strlen(app_settings_books_dir());
-    if (!strncmp(path, app_settings_books_dir(), selected_len) && path[selected_len] == '/') {
-        root = app_settings_books_dir(); name = path + selected_len + 1;
-        if (!sd_ready()) return ESP_ERR_INVALID_STATE;
-    } else if (!strcmp(app_settings_books_dir(), "/sdcard/books") && !strncmp(path, "/sdcard/book/", 13)) {
-        root = "/sdcard/book"; name = path + 13;
-        if (!sd_ready()) return ESP_ERR_INVALID_STATE;
-    } else if (!strncmp(path, "/flash/books/", 13)) {
-        root = "/flash/books"; name = path + 13;
+    if (!strncmp(path, "/flash/books/", 13)) {
         if (!book_store_flash_ready()) return ESP_ERR_INVALID_STATE;
-    } else return ESP_ERR_INVALID_ARG;
-    size_t len = strlen(name);
-    if (!len || len > 255) return ESP_ERR_INVALID_ARG;
-    for (const unsigned char* p = (const unsigned char*)name; *p; ++p) {
-        if (*p < 32 || *p == 127 || *p == '/' || *p == '\\' || *p == ':') return ESP_ERR_INVALID_ARG;
+        root = "/flash/books"; name = path + 13;
+    } else {
+        if (!strncmp(path, app_settings_books_dir(), selected_len) && path[selected_len] == '/') {
+            root = app_settings_books_dir(); name = path + selected_len + 1;
+        } else if (!strncmp(path, "/sdcard/", 8)) {
+            // 书架会列出 books 子目录里的书，也补入文件管理在卡内任意位置打开过的书；
+            // 原先只受理书根第一层，这些书删除一律失败——改按已挂载 TF 根受理
+            // （上游 083fd86 同修 2026-10-25）。
+            root = "/sdcard"; name = path + 8;
+        } else return ESP_ERR_INVALID_ARG;
+        if (!sd_ready()) return ESP_ERR_INVALID_STATE;
     }
-    const char* ext = strrchr(name, '.');
+    size_t len = strlen(name);
+    if (!len || name[0] == '/' || name[len - 1] == '/' || strstr(name, "//") || strstr(name, "..")) return ESP_ERR_INVALID_ARG;
+    for (const unsigned char* p = (const unsigned char*)name; *p; ++p) {
+        if (*p < 32 || *p == 127 || *p == '\\' || *p == ':') return ESP_ERR_INVALID_ARG;
+    }
+    const char* base = strrchr(name, '/');
+    base = base ? base + 1 : name;
+    if (strlen(base) > 255) return ESP_ERR_INVALID_ARG;
+    const char* ext = strrchr(base, '.');
     if (!ext || (strcasecmp(ext, ".txt") && strcasecmp(ext, ".epub"))) return ESP_ERR_INVALID_ARG;
     struct stat st;
     if (stat(root, &st) != 0 || !S_ISDIR(st.st_mode)) return ESP_ERR_INVALID_STATE;

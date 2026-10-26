@@ -37,7 +37,9 @@
 // 索引载荷格式随标题/锚点池化而变：旧缓存里的定长字段读不出指针，必须整体失效。
 // The index payload changed with the title/anchor pooling: fixed fields in an old cache cannot be
 // turned back into pointers, so every older cache has to lapse.
-#define EPUB_CACHE_VERSION 13u
+// 14：无名页不再缓存「第 N 节」占位标题，旧缓存会把这些名字带回来（上游 a370528）。
+// 14: unnamed pages no longer cache an invented label, so caches holding one must lapse.
+#define EPUB_CACHE_VERSION 14u
 #define EPUB_META_CACHE_VERSION 1u
 #define EPUB_CSS_MAX (256u * 1024u)
 #define EPUB_CSS_FILE_MAX (128u * 1024u)
@@ -522,7 +524,10 @@ static void xml_reader(xml_t *xml, const char *text, size_t n) {
 /* ---- ZIP 路径及内容 / ZIP paths and content ---- */
 
 static bool resolve_path(const char *base, const char *href, char out[EPUB_PATH_CAP]) {
-    char decoded[EPUB_PATH_CAP]; size_t used = 0;
+    /* 冒号仅首段拒绝（上游 b2e5b95 同修 2026-10-25）：首段的冒号只可能是
+     * 协议/盘符分隔符；段内冒号是合法 ZIP 条目名——部分工具把章节文件名
+     * 打散成 `*` 与 `:` 组合，旧规则整本解析失败、书打不开。 */
+    char decoded[EPUB_PATH_CAP]; size_t used = 0; bool first_segment = true;
     for (size_t i = 0; href[i] && href[i] != '#'; ++i) {
         unsigned char c = (unsigned char)href[i];
         if (c == '%') {
@@ -530,7 +535,9 @@ static bool resolve_path(const char *base, const char *href, char out[EPUB_PATH_
             int a = hex(href[i + 1]), b = hex(href[i + 2]); if (a < 0 || b < 0) return false;
             c = (unsigned char)((a << 4) | b); i += 2;
         }
-        if (c < 32 || c == 127 || c == '\\' || c == ':' || c == '?' || used + 1 >= sizeof(decoded)) return false;
+        if (c == ':' && first_segment) return false;
+        if (c == '/') first_segment = false;
+        if (c < 32 || c == 127 || c == '\\' || c == '?' || used + 1 >= sizeof(decoded)) return false;
         decoded[used++] = (char)c;
     }
     decoded[used] = 0;
@@ -689,9 +696,8 @@ static esp_err_t package_parse(book_epub_t *book, const char *opf, char ncx[EPUB
             size_t bytes = zip_entry_size(book->zip, entry);
             if (bytes > EPUB_ENTRY_MAX || bytes > UINT32_MAX - book->total) { err = ESP_ERR_INVALID_SIZE; break; }
             chapter_t *chapter = &book->chapters[book->count]; chapter->zip_index = entry; chapter->offset = book->total;
-            char fallback[EPUB_TITLE_CAP];
-            snprintf(fallback, sizeof(fallback), "第 %u 节", (unsigned)book->count + 1);
-            chapter->title = text_intern_cap(book, fallback, sizeof(fallback));
+            // 无名页先留空：目录会命名，正文题头也会补真名；编造的「第 N 节」不再出现（上游 a370528）。
+            chapter->title = text_intern_cap(book, "", 1);
             book->total += (uint32_t)bytes; ++book->count;
         }
         if (xml.failed || !book->count) err = ESP_ERR_INVALID_ARG;
@@ -851,9 +857,7 @@ static esp_err_t navigation_parse(book_epub_t *book, const char *path, bool ncx)
         for (size_t i = 0; i < book->count; ++i) if (!(previously_titled[i / 8] & (1u << (i % 8)))) {
             book->chapters[i].titled = false;
             book->chapters[i].nav_titled = false;
-            char fallback[EPUB_TITLE_CAP];
-            snprintf(fallback, sizeof(fallback), "第 %u 节", (unsigned)i + 1);
-            book->chapters[i].title = text_intern_cap(book, fallback, sizeof(fallback));
+            book->chapters[i].title = text_intern_cap(book, "", 1);   // 无名页不编造标签（上游 a370528）
         }
     }
     if (err == ESP_OK) {
@@ -1534,7 +1538,12 @@ esp_err_t book_epub_navigation_title(book_epub_t *book, size_t position, char *b
     nav_entry_t *entry = navigation_entry(book, position);
     if (!entry) {
         size_t chapter = book_epub_navigation_chapter(book, position);
-        return chapter == SIZE_MAX ? ESP_ERR_INVALID_ARG : book_epub_chapter_title(book, chapter, buf, cap);
+        if (chapter == SIZE_MAX) return ESP_ERR_INVALID_ARG;
+        esp_err_t err = book_epub_chapter_title(book, chapter, buf, cap);
+        // 只有按 spine 生成的备用目录行需要一行标签；正文、题头和书签不给无名页编名
+        // （上游 a370528 同修：仅此处保留「第 N 节」，其余链路均已改空标题）。
+        if (err == ESP_OK && !buf[0]) snprintf(buf, cap, "第 %u 节", (unsigned)chapter + 1);
+        return err;
     }
     size_t n = strlen(entry->title);
     if (n >= cap) return ESP_ERR_INVALID_SIZE;

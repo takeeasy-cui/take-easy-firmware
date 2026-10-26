@@ -104,6 +104,9 @@ typedef struct {
     bool quick_ok;
     uint16_t qb_mv;
     uint16_t qb_soc;
+
+    bool display_soc_valid;   ///< 主机高段稳定结果有效；原始 PMU 字段不变（上游 rc98 吸收）
+    uint16_t display_soc_permille;
     uint8_t qb_charge;
     uint8_t qb_flags;
 
@@ -138,6 +141,7 @@ static inline int pmu_battery_percent(const pmu_snapshot_t *p) {
         if (!p->status_ok || !(p->flags & PMU_STATUS_BATTERY_VALID)) return -1;
         soc = p->soc_permille;
     }
+    if (soc <= 1000 && p->display_soc_valid) soc = p->display_soc_permille;
     return soc <= 1000 ? (soc + 5) / 10 : -1;
 }
 static inline bool pmu_battery_charging(const pmu_snapshot_t *p) {

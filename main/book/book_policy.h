@@ -2,9 +2,9 @@
  * SPDX-FileCopyrightText: 2026 mindreset
  * SPDX-License-Identifier: Apache-2.0
  *
- * 阅读进度换算和晃动判定，不访问硬件。/ Reading position and shake policy without hardware access.
- * 用户修订：横向一次动作翻页，按方向返回 -1/+1；冷却800ms并静止120ms后再接受动作。
- * User revision: one horizontal impulse returns -1/+1; rearm after 800ms cooldown and 120ms at rest.
+ * 阅读进度换算，不访问硬件。/ Reading position policy without hardware access.
+ * （2026-10-26：晃动翻页判定 book_shake_feed 已随功能下线删除；settings 备份
+ * 格式的 BK_SHAKE 位 v15 起另作他用，与此无关。）
  */
 #pragma once
 #include <stdbool.h>

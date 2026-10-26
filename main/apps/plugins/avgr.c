@@ -32,9 +32,12 @@
  * 底栏统一 y=612..688 外框内（存档左/提示中/证物右），面板与对话框
  * 主区都收在 y≤604，与底栏物理隔离（挡线问题根治）。 */
 #define AVGR_DIALOG_TOP    404
+#define AVGR_NAME_TOP      378   /* 名牌上沿（压住对话框顶沿，GBA 名牌样式；
+                                * DU 对话区刷新上界同步用） */
 #define AVGR_TEXT_X        48
-#define AVGR_TEXT_Y0       508
-#define AVGR_TEXT_LH       54
+#define AVGR_TEXT_Y0       448   /* v4：正文从名牌下起（原 508 第三行
+                                * y=616 撞进底栏 612..668 按钮区=挡字根因） */
+#define AVGR_TEXT_LH       52
 #define AVGR_TEXT_PX       32
 #define AVGR_PANEL_TOP     56
 #define AVGR_PANEL_BOTTOM  600
@@ -85,6 +88,7 @@ typedef struct {
     bool has_save;
     bool save_flash;         /* 存档反馈停驻：按钮态已存档，~700ms 后回标题 */
     int64_t save_flash_until;
+    bool pending_du;         /* 换立绘两段式收尾：场景区 GL16 已推，补推对话框 DU */
     char title[128], cur_name[48], cur_text[AVG_MAX_TEXT];
     int shown;
     char script_path[192];
@@ -339,21 +343,21 @@ static void draw_line_cb(void* user, const char* line, int y) {
     ui_text_vc((uint8_t*)user, AVGR_TEXT_X, y, AVGR_TEXT_PX, line, EPD_DRAW_ALIGN_LEFT, false);
 }
 static void paint_dialog(uint8_t* fb, avgr_state_t* s) {
-    /* v3（2026-10-18 加大）：对话框底板 404..604，底栏 612..668 独立。
-     * 名牌 26px、正文 32px、行距 54。 */
+    /* v4（2026-10-23 用户）：名牌上移压住对话框顶沿，正文 y448 起 3 行×52，
+     * 第三行底 586 不再撞底栏按钮（原第三行 y616 与底栏 612..668 重叠
+     * =「存档/证物按钮挡字」根因）；分隔线取消还位给文字。 */
     ui_fill_round_rect(fb, (EpdRect){0, AVGR_DIALOG_TOP, 1216, 684 - AVGR_DIALOG_TOP}, 0, 0xff);
     epd_fill_rect((EpdRect){0, AVGR_DIALOG_TOP + 6, 1216, 3}, AVGR_INK, fb);
     if (s->cur_name[0]) {
-        ui_fill_round_rect(fb, (EpdRect){44, AVGR_DIALOG_TOP + 24, 196, 56}, 12, AVGR_INK);
-        ui_text_vc(fb, 142, AVGR_DIALOG_TOP + 52, 26, s->cur_name,
+        ui_fill_round_rect(fb, (EpdRect){44, AVGR_NAME_TOP, 196, 56}, 12, AVGR_INK);
+        ui_text_vc(fb, 142, AVGR_NAME_TOP + 28, 26, s->cur_name,
                    EPD_DRAW_ALIGN_CENTER, true);
     }
-    epd_fill_rect((EpdRect){AVGR_TEXT_X, AVGR_DIALOG_TOP + 92, 92, 3}, AVGR_HAIR, fb);
     /* 整句直出；行宽 70 单位（=35 中文字≈1120px 满 1216 宽，2026-10-18
      * “右半空白”根因：竖屏时代 34 单位遗到横屏只占半幅）。 */
     gc_ui_typewrap(s->cur_text, (int)strlen(s->cur_text), 3, 70, draw_line_cb,
                    fb, AVGR_TEXT_Y0, AVGR_TEXT_LH);
-    if (s->cur_text[0]) gc_ui_wait_cursor(fb, 1150, AVGR_DIALOG_TOP + 216);
+    if (s->cur_text[0]) gc_ui_wait_cursor(fb, 1150, AVGR_TEXT_Y0 + 2 * AVGR_TEXT_LH + 14);
     paint_save_btn(fb, s);
     paint_ev_btn(fb);
 }
@@ -586,10 +590,17 @@ static gc_ev_t apply(avgr_state_t* s, gc_ctx_t* g, uint32_t dirty) {
     g->want_du = false;                    /* 先复位（2026-10-18 实锤：整屏分支
                                               * 残留上帧 DU 档，出示证据后整屏巨变走
                                               * 2值DU刷——灰阶全糊视觉上“没反应”） */
-    if ((dirty & (AVG_DIRTY_SCENE | AVG_DIRTY_UI)) || s->core.mode != AVG_MODE_DIALOG)
+    if ((dirty & (AVG_DIRTY_SCENE | AVG_DIRTY_UI)) || s->core.mode != AVG_MODE_DIALOG) {
+        s->pending_du = false;
         g->area = (EpdRect){0, 0, 1216, 684};
-    else {
-        g->area = (EpdRect){0, AVGR_DIALOG_TOP, 1216, 684 - AVGR_DIALOG_TOP};
+    } else if (dirty & AVG_DIRTY_CHAR) {
+        /* 说话人自动换立绘（voicemap）：场景区+名牌 GL16 局部刷新；对话框
+         * 文字由 tick 补推 DU（两段式，免整屏 GL16 顿挫）。 */
+        s->fb_scene_ok = false;
+        s->pending_du = (dirty & AVG_DIRTY_DIALOG) != 0;
+        g->area = (EpdRect){0, 0, 1216, AVGR_DIALOG_TOP + 30};
+    } else {
+        g->area = (EpdRect){0, AVGR_NAME_TOP, 1216, 684 - AVGR_NAME_TOP};
         g->want_du = true;    /* 对话框纯黑白 → DU 快刷 */
     }
     g->want_full = false;
@@ -803,6 +814,17 @@ static void trim_assets(avgr_state_t* s) {
 static gc_ev_t tick(gc_ctx_t* g) {
     avgr_state_t* s = (avgr_state_t*)g->state;
     if (!s->loaded || !s->running) return GC_EV_NONE;
+    /* 换立绘两段式收尾：场景区 GL16 已推过，此刻补推对话框 DU（文字不在
+     * 上次刷新区内）。模式变了/资产未就绪则作废（后续全屏刷新会覆盖）。 */
+    if (s->pending_du) {
+        s->pending_du = false;
+        if (!s->core.assets_pending && s->core.mode == AVG_MODE_DIALOG) {
+            g->area = (EpdRect){0, AVGR_NAME_TOP, 1216, 684 - AVGR_NAME_TOP};
+            g->want_du = true;
+            g->want_full = false;
+            return GC_EV_DIRTY;
+        }
+    }
     /* 存档反馈停驻：到点整屏回标题；停驻期间不推进剧情。 */
     if (s->save_flash) {
         if ((int64_t)g->app->now_ms >= s->save_flash_until) {

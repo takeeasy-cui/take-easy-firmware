@@ -99,6 +99,7 @@
 #define NVS_KEY_BOOK_VERTICAL "bk_vert"
 #define NVS_KEY_BOOK_LANDSCAPE "bk_land"
 #define NVS_KEY_BOOK_ORIENTATION "bk_ornt"
+#define NVS_KEY_BOOK_ROTATE_LOCK "bk_rotlk"   /* 阅读自动旋转锁定（2026-10-25 用户：默认锁，开则阅读页随姿态转） */
 #define FONT_PATH_MAX 160
 #define MEDIA_DIR_MAX 96
 
@@ -166,6 +167,7 @@ static bool s_book_vertical;
 /* v2 屏幕方向四档（用户 2026-10-19）：0=竖屏 1=横屏 2=竖屏倒转 3=横屏倒转；
  * 旧 bk_land 布尔迁移进 0/1，s_book_landscape 变量由方向派生。 */
 static uint8_t s_book_orientation;
+static bool s_book_rotate_locked = true;   /* 默认锁定（用户 2026-10-25） */
 static uint8_t s_book_tracking = 2, s_book_reading_line, s_book_rule_offset = 4;
 static uint8_t s_book_indent = 2;
 static uint8_t s_book_indent_adjust = 20;
@@ -430,6 +432,11 @@ void app_settings_init(void) {
             if (nvs_get_u8(h, NVS_KEY_BOOK_LANDSCAPE, &land) == ESP_OK && land)
                 s_book_orientation = 1;
         }
+    }
+    {
+        uint8_t rotlk = 1;
+        if (nvs_get_u8(h, NVS_KEY_BOOK_ROTATE_LOCK, &rotlk) == ESP_OK && rotlk <= 1)
+            s_book_rotate_locked = rotlk == 1;
     }
     uint8_t tracking = 2, reading_line = 0, rule_offset = 4, indent = 2, indent_adjust = 20;
     if (nvs_get_u8(h, NVS_KEY_BOOK_TRACK, &tracking) == ESP_OK && tracking <= 4)
@@ -810,6 +817,12 @@ void app_settings_set_book_orientation(uint8_t orientation) {
     if (orientation > 3 || orientation == s_book_orientation) return;
     s_book_orientation = orientation;
     nvs_put_u8(NVS_KEY_BOOK_ORIENTATION, orientation);
+}
+bool app_settings_book_rotate_locked(void) { return s_book_rotate_locked; }
+void app_settings_set_book_rotate_locked(bool locked) {
+    if (locked == s_book_rotate_locked) return;
+    s_book_rotate_locked = locked;
+    nvs_put_u8(NVS_KEY_BOOK_ROTATE_LOCK, locked ? 1u : 0u);
 }
 uint8_t app_settings_book_landscape(void) { return (s_book_orientation & 1) != 0; }
 void app_settings_set_book_landscape(uint8_t on) {

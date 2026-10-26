@@ -638,7 +638,13 @@ void app_loop_run(const app_loop_config_t* config) {
                         last_media_poll_ms = ctx.now_ms;
                         ctx.pressed = false;
                         ctx.released = false;
-                        app_present(&ctx, current, APP_REDRAW_PAGE);
+                        /* 2026-10-25 快照路径：锁前帧整帧还原，跳过整页重绘。
+                         * display_request_full_refresh 已在上方置位，
+                         * update_display_fast_page 消费该标志走单次 GC16。 */
+                        if (!app_lock_snapshot_swap(ctx.fb))
+                            app_present(&ctx, current, APP_REDRAW_PAGE);
+                        else
+                            guard_draw_result(ctx.hl, update_display_fast_page(ctx.hl));
                     }
                 } else if (action == UI_POWER_ACTION_RESTART) {
                     power_dialog_open = false;
@@ -834,7 +840,11 @@ void app_loop_run(const app_loop_config_t* config) {
                         ctx.consumed = true;
                         ctx.pressed = false;
                         ctx.released = false;
-                        app_present(&ctx, current, APP_REDRAW_PAGE);
+                        /* 2026-10-25 快照路径：锁前帧整帧还原，跳过整页重绘。 */
+                        if (!app_lock_snapshot_swap(ctx.fb))
+                            app_present(&ctx, current, APP_REDRAW_PAGE);
+                        else
+                            guard_draw_result(ctx.hl, update_display_fast_page(ctx.hl));
                     } else {
                         power_dialog_open = true;
                         ui_power_dialog_reset(&power_dialog, touch.touched);
@@ -878,8 +888,14 @@ void app_loop_run(const app_loop_config_t* config) {
                         ctx.released = false;
                         // 醒来还在同一页，重画一次免得留着锁屏图。
                         // Still the same page; redraw so the lock image does not stay.
-                        if (menu_open) present_menu(&ctx, current, menu_leaf, &feedback);
-                        else app_present(&ctx, current, APP_REDRAW_PAGE);
+                        /* 2026-10-25 快照路径：锁前帧整帧还原（菜单开着时快照即含菜单
+                         * 画面，菜单状态变量未变，直接还原等价）；失败走常规重绘。 */
+                        if (!app_lock_snapshot_swap(ctx.fb)) {
+                            if (menu_open) present_menu(&ctx, current, menu_leaf, &feedback);
+                            else app_present(&ctx, current, APP_REDRAW_PAGE);
+                        } else {
+                            guard_draw_result(ctx.hl, update_display_fast_page(ctx.hl));
+                        }
                     }
                 }
             }
@@ -980,8 +996,15 @@ void app_loop_run(const app_loop_config_t* config) {
             poll_media(&ctx, current, &media_mounted, &media_invalidated);
             last_media_poll_ms = ctx.now_ms;
             ctx.pressed = ctx.released = false;
-            if (menu_open) present_menu(&ctx, current, menu_leaf, &feedback);
-            else app_present(&ctx, current, APP_REDRAW_PAGE);
+            if (app_lock_snapshot_swap(ctx.fb)) {
+                /* 2026-10-25 快照路径：锁前帧整帧还原，单次全刷收敛（同上）。 */
+                guard_draw_result(ctx.hl, update_display_fast_page(ctx.hl));
+            } else if (menu_open) {
+                present_menu(&ctx, current, menu_leaf, &feedback);
+            } else {
+                app_present(&ctx, current, APP_REDRAW_PAGE);
+            }
+            app_lock_resume_pending_run();   /* 解锁首帧已出：补办事前被延后的传输恢复 */
         }
         if (menu_open && feedback.updates > 0
             && ctx.now_ms - feedback.last_ms >= UI_SETTLE_IDLE_MS) {

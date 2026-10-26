@@ -17,7 +17,7 @@ from pathlib import Path
 
 CMDS_WORD = {"case", "label", "jump", "ifset", "ifclear", "flag", "bg",
              "char", "char_off", "say", "think", "gain_ev", "ev",
-             "testimony", "stmt", "press", "clash", "ask_ev", "end"}
+             "testimony", "stmt", "press", "clash", "ask_ev", "end", "voicemap"}
 CAP = {"cmd": 4096, "label": 256, "ev": 24, "stmt": 12, "flag": 32, "text": 640}
 
 def strip_comment(line: str) -> str:
@@ -39,8 +39,13 @@ def check(path: Path) -> int:
         if head not in CMDS_WORD:
             problems.append(f"{ln}: 未知命令「{head}」")
             continue
-        cmd_count += 1
         rest = l[len(head):].strip()
+        if head == "voicemap":
+            # 元数据：说话人→立绘映射，不产生命令、不计入容量（引擎同语义）
+            if not re.match(r'^"[^"]+"\s+"[^"]+"\s*$', rest):
+                problems.append(f"{ln}: voicemap 格式应为 voicemap \"说话人\" \"立绘文件\"")
+            continue
+        cmd_count += 1
         if head == "case":
             # 引擎允许多条 case：后声明覆盖，最终标题取最后一条（两章合并包靠此机制）
             case_seen = True

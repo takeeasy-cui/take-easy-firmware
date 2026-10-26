@@ -26,6 +26,7 @@ extern "C" {
 #define AVG_MAX_EVIDENCE  24       /* 案件定义证据数（两章合并实需 20；证物簿 UI 按行数动态分页无写死） */
 #define AVG_MAX_STMTS     12       /* 单段证言条目数 */
 #define AVG_MAX_FLAGS     32       /* 剧情标记数 */
+#define AVG_MAX_VOICE_MAP 16       /* 说话人→立绘映射表（voicemap 元数据） */
 #define AVG_SAVE_BYTES    2048     /* 存档行缓冲 */
 
 /* 立绘槽位：0=左 1=中 2=右（与绘制回调的 side 参数一致）。 */

@@ -9,7 +9,7 @@
  * User revision: use the approved compact two-column reading sheet; tap cycles refresh/effect and key controls retain their secondary page.
  * 冻结：Phase4b统一手势入口并接管三键为上页/工具条/下页；工具条保留强刷。屏幕翻页在抬起提交，不画按下态。
  * 用户修订：图文混排原样采用 PR9 的 book_layout；调用侧只适配图片缓存与上下文生命周期。
- * 晃动默认关；横向左晃上一页、右晃下一页，触摸与回弹不触发；离页恢复加速度配置并休眠。render只绘图。
+ * 晃动翻页已下线（2026-10-26）；传感器仅剩自动旋转采样，离页休眠。render只绘图。
  * 预渲染与同步推屏重叠、按行可停；推屏返回前交还字体与章节资源。
  * 普通翻页只刷新正文与页脚；手动或周期清残影整屏全刷。
  * 用户修订：阅读手动与周期全刷恢复 rc90 的原表 GC16 目标页输出，不先擦白再补文字。
@@ -437,6 +437,115 @@ static book_layout_draw_cursor_t s_prep_cursor;
 static uint32_t s_next_generation;
 static uint8_t* s_next_fb;
 static int s_next_page = -1, s_prep_page = -1;
+
+/* ---- 阅读自动旋转（用户 2026-10-25）：解锁后阅读页随屏幕姿态换向 ----
+ * 判定=静置迟滞：姿态判出来且与当前档不同后，需连续稳定 HOLD_MS 才切换；
+ * 采样每 200ms 一次；面板/工具栏打开、搜索编辑、触摸中、
+ * 翻页后 1.5s 内都不判（防操作中途翻转）。仅 READING 视图生效。 */
+#define ROTATE_SAMPLE_MS  200
+#define ROTATE_HOLD_MS    600
+#define ROTATE_SETTLE_MS  1500
+static app_redraw_t apply_reader_orientation(app_ctx_t* ctx, uint8_t orientation);
+typedef struct {
+    bool ready;
+    int64_t last_ms;        /* 上次采样 */
+    uint8_t candidate;      /* 候选方向 0-3（0xFF=无） */
+    int64_t candidate_ms;   /* 候选计时基点 */
+    int64_t hold_until_ms;  /* 各类静默期（翻页/开关面板后） */
+    uint8_t last_pose;      /* 上次姿态类（日志用；0xFD=未记） */
+    int64_t pose_log_ms;    /* 姿态日志限频基点 */
+} reader_rotate_t;
+static reader_rotate_t s_auto_rot;
+
+void reader_auto_rotate_reset(void);
+void reader_auto_rotate_reset(void) {
+    s_auto_rot.ready = false;
+    s_auto_rot.candidate = 0xFF;
+    s_auto_rot.candidate_ms = 0;
+    s_auto_rot.hold_until_ms = 0;
+    s_auto_rot.last_pose = 0xFD;
+    s_auto_rot.pose_log_ms = 0;
+    /* 不动 last_ms：下次采样直接重新定基 */
+}
+
+/* 姿态→返回值：0/1/2/3=方向档；0xFE=平放/深仰（不动作）；0xFF=不定（斜持）。
+ * 设备坐标系（read_pico_accel_read 内含 read_pico_accel_to_device 变换）。
+ * 2026-10-26 真机实测修正（证据：竖持阅读 x=+831/y=+207/z=+516 —— 后仰 34°
+ * 的 cos/sin 几何完全吻合；三次开机直立位 x=+455~949 均大正）：x=竖屏长轴
+ * （顶朝上为正）；z=屏幕法线（屏幕朝天为正）；y=短轴（横持主导）。
+ * 首版「竖持 z≈+1g」假设全错，已废弃。
+ * 档位语义对齐 apply_reader_orientation 注释（描述的是**渲染内容方向**）：
+ * 0 正立 / 1 内容顺转90°（内容顶朝设备右）/ 2 倒立 / 3 内容逆转90°（内容
+ * 顶朝设备左）——物理持握方向恰好相反：设备顺持（原顶边朝右，右手横屏）
+ * 应切档3；逆持（原顶边朝左，左手横屏）应切档1。
+ * 2026-10-26 复测定稿：竖正0/竖倒2 ✓；横屏首版 1/3 写反（用户复测「正好
+ * 反了」= 顺持时叠加渲染也顺转、呈 180° 倒置），已对调。
+ * 平放判定 az>500（后仰≥60°/平持不动作，防后仰阅读误判）。最终映射：
+ * y>+500 = 顺持（原顶边朝右）→档3；y<-500 = 逆持（原顶边朝左）→档1。 */
+static uint8_t reader_rotate_attitude(int x, int y, int z) {
+    const int ax = x < 0 ? -x : x, ay = y < 0 ? -y : y, az = z < 0 ? -z : z;
+    if (az >= ax && az >= ay && az > 500) return 0xFE;   /* 平放/深仰（法线主导）：不动作 */
+    if (ax >= ay) return x > 500 ? 0 : (x < -500 ? 2 : 0xFF);  /* 竖屏正立 / 倒立 */
+    return y > 500 ? 3 : (y < -500 ? 1 : 0xFF);          /* 横屏：顺持(顶边朝右)→3 / 逆持(顶边朝左)→1 */
+}
+
+/* 姿态类名（日志用，标注**物理持握方向**→档位）：档1=逆持（原顶边朝左）、
+ * 档3=顺持（原顶边朝右）——与渲染注释的“内容顶朝右/左”相反，勿混淆。 */
+static const char* pose_name(uint8_t p) {
+    switch (p) {
+    case 0:  return "竖正持0";
+    case 1:  return "横逆持1";
+    case 2:  return "竖倒持2";
+    case 3:  return "横顺持3";
+    case 0xFE: return "平放";
+    default: return "不定";
+    }
+}
+
+static app_redraw_t reader_auto_rotate_tick(app_ctx_t* ctx) {
+    if (app_settings_book_rotate_locked()) return APP_REDRAW_NONE;
+    if (s_view != READING || s_reader_panel != READER_PANEL_NONE || s_clear_confirm || ctx->consumed ||
+        s_scan_pending || (ctx->touch && ctx->touch->touched) || !ctx->sensor_ready || !ctx->acc)
+        return APP_REDRAW_NONE;
+    if (ctx->now_ms < s_auto_rot.hold_until_ms) return APP_REDRAW_NONE;
+    if (ctx->now_ms - s_auto_rot.last_ms < ROTATE_SAMPLE_MS) return APP_REDRAW_NONE;
+    s_auto_rot.last_ms = ctx->now_ms;
+    /* 幂等唤醒（2026-10-25 真机教训）：开书时若还处于锁定状态，开书路径不 wake；
+     * 用户随后在面板解锁回来时传感器仍在掉电——read 全失败=毫无反应。
+     * 每 200ms 调一次 wake 的成本是纯内存标志查询（sc7a20h_powered），已上电即空转。 */
+    read_pico_sensor_wake(ctx->acc);
+    sc7a20h_sample_t sample;
+    if (read_pico_accel_read(ctx->acc, &sample) != ESP_OK) return APP_REDRAW_NONE;
+    uint8_t want = reader_rotate_attitude(sample.x_mg, sample.y_mg, sample.z_mg);
+    /* 姿态类变化日志（标定证据链）：换姿势打一行，限频 800ms 防边界抖动刷屏。
+     * 开书/开关锁后 reset 置 0xFD，下一拍必打当前姿态（承接旧 base 行职责）。 */
+    if (want != s_auto_rot.last_pose && ctx->now_ms - s_auto_rot.pose_log_ms > 800) {
+        ESP_LOGI(TAG, "pose %s: x=%d y=%d z=%d (当前档%d)", pose_name(want),
+                 sample.x_mg, sample.y_mg, sample.z_mg, (int)app_settings_book_orientation());
+        s_auto_rot.last_pose = want;
+        s_auto_rot.pose_log_ms = ctx->now_ms;
+    }
+    if (!s_auto_rot.ready) {          /* 首样本：只定基不动作（姿态值已由上方日志带出） */
+        s_auto_rot.ready = true;
+        s_auto_rot.candidate = 0xFF;
+        return APP_REDRAW_NONE;
+    }
+    if (want > 3 || want == app_settings_book_orientation()) {
+        s_auto_rot.candidate = 0xFF;   /* 平放/深仰/不定/已是当前档：候选作废 */
+        return APP_REDRAW_NONE;
+    }
+    if (s_auto_rot.candidate != want) {
+        s_auto_rot.candidate = want;
+        s_auto_rot.candidate_ms = ctx->now_ms;
+        return APP_REDRAW_NONE;
+    }
+    if (ctx->now_ms - s_auto_rot.candidate_ms < ROTATE_HOLD_MS) return APP_REDRAW_NONE;
+    s_auto_rot.candidate = 0xFF;
+    s_auto_rot.hold_until_ms = ctx->now_ms + ROTATE_SETTLE_MS;
+    ESP_LOGI(TAG, "auto-rotate: %d,%d,%d -> 档%d",
+             sample.x_mg, sample.y_mg, sample.z_mg, (int)want);
+    return apply_reader_orientation(ctx, want);   /* 复用手动切换全链路（重排保位+整屏收敛） */
+}
 
 #define s_toolbar (s_reader_panel != READER_PANEL_NONE)
 
@@ -1263,7 +1372,8 @@ static void reader_footer_strip_number(char *dst, size_t cap, const char *source
         }
         name = after;
     }
-    if (!*name || !strcmp(name, "本章") || !strcmp(name, "章节")) name = "未命名章节";
+    // 无名页不给占位名：底栏只留页码与全书进度（上游 a370528 同修 2026-10-25）。
+    if (!*name || !strcmp(name, "本章") || !strcmp(name, "章节")) name = "";
     copy_text(dst, cap, name);
 }
 static void reader_footer_chapter_name(char *dst, size_t cap) {
@@ -2535,10 +2645,14 @@ static void draw_turn_settings(uint8_t *fb) {
  * 四宫格：竖屏/横屏/竖屏倒转/横屏倒转。
  * 图标=屏幕比例（684:1216）圆角边框 + 大写 A（三段粗线），A 的朝向即该档阅读正文的
  * 朝向；只旋转阅读界面，工具栏与退出阅读的系统 UI 保持常态竖屏。 */
+/* 「旋转锁定」开关（用户 2026-10-25）：默认锁定；解锁后阅读页随姿态自动换向。
+ * 与四宫格同页：宫格压缩到 y0..GRID_BOTTOM，开关行在其下、完成键上。 */
+#define ORIENT_GRID_BOTTOM 1044
 static EpdRect orientation_card(int index) {
-    /* 卡区随 sheet 顶动态：标题区下留 32，完成键上留 28，两行均分（含 16 间隙）。 */
+    /* 卡区随 sheet 顶动态（v3 2026-10-25：宫格压缩到 ORIENT_GRID_BOTTOM，
+     * 给下方「旋转锁定」行让位；两行均分含 16 间隙）。 */
     int y0 = reading_settings_top() + 100;
-    int h = (1113 - y0 - 16) / 2;
+    int h = (ORIENT_GRID_BOTTOM - y0 - 16) / 2;
     return (EpdRect){36 + (index % 2) * 316, y0 + (index / 2) * (h + 16), 296, h};
 }
 static void draw_orientation_icon(uint8_t* fb, int cx, int cy, int mode) {
@@ -2570,6 +2684,34 @@ static void draw_orientation_icon(uint8_t* fb, int cx, int cy, int mode) {
     nothing_thick_line(fb, cx + (px[3] - cx), cy + (py[3] - cy),
                        cx - (px[3] - cx), cy - (py[3] - cy), 4, 0x00);
 }
+/* 「旋转锁定」开关（用户 2026-10-25）：默认锁定；解锁后阅读页随姿态自动换向。
+ * 与四宫格同页：开关行在宫格下、完成键上。 */
+static EpdRect orientation_lock_card(void) {
+    return (EpdRect){36, 1060, 612, 62};
+}
+static void draw_orientation_lock(uint8_t* fb, bool locked) {
+    EpdRect card = orientation_lock_card();
+    ui_fill_round_rect(fb, card, 16, locked ? 0xe8 : 0xd8);
+    ui_draw_control_frame(fb, card, 16, locked ? 0x50 : 0x00);
+    /* 开关圆：左半行程=锁定（实心圆），右半=自动（描边圆+环），文字随状态。 */
+    int cx = card.x + 44, cy = card.y + card.height / 2;
+    if (locked) {
+        epd_fill_circle(cx, cy, 15, UI_GRAY_BLACK, fb);
+        epd_draw_circle(cx, cy, 19, 0x38, fb);
+    } else {
+        epd_draw_circle(cx, cy, 15, 0x00, fb);
+        epd_draw_circle(cx, cy, 19, 0x88, fb);
+    }
+    reader_panel_text_vc(fb, card.x + 84, cy - 12, 26, "旋转锁定", EPD_DRAW_ALIGN_LEFT, false);
+    reader_panel_text_vc(fb, card.x + 84, cy + 16, 17,
+                         locked ? "工具栏与退出阅读保持竖屏" : "阅读中随姿态自动旋转",
+                         EPD_DRAW_ALIGN_LEFT, false);
+    /* 状态字（2026-10-26 用户反馈看不清）：卡片底色为浅灰 0xe8/0xd8，
+     * 白字（inverted=true）几乎不可见——必须黑字（false）。 */
+    reader_panel_text_vc(fb, card.x + card.width - 20, cy, 22,
+                         locked ? "已锁定" : "已解锁",
+                         EPD_DRAW_ALIGN_RIGHT, false);
+}
 static void draw_orientation_settings(uint8_t* fb) {
     draw_sheet(fb, reading_settings_top(), "屏幕方向");
     draw_sheet_back(fb, reading_settings_top());
@@ -2587,7 +2729,7 @@ static void draw_orientation_settings(uint8_t* fb) {
         epd_draw_circle(card.x + card.width - 28, card.y + 28, 12, 0x38, fb);
         if (selected) epd_fill_circle(card.x + card.width - 28, card.y + 28, 7, UI_GRAY_BLACK, fb);
     }
-    reader_panel_text_vc(fb, 342, 1120, 20, "工具栏与退出阅读的系统界面保持竖屏", EPD_DRAW_ALIGN_CENTER, false);
+    draw_orientation_lock(fb, app_settings_book_rotate_locked());
     ui_fill_round_rect(fb, (EpdRect){36, 1141, 612, 58}, 20, UI_GRAY_BLACK);
     reader_panel_text_vc(fb, 342, 1170, 26, "完成", EPD_DRAW_ALIGN_CENTER, true);
 }
@@ -2774,8 +2916,7 @@ static void draw_reader_bookmarks(uint8_t* fb) {
         ui_fill_round_rect(fb, item, 14, selected ? 0xc0 : current ? 0xc8 : 0xe8);
         ui_draw_control_frame(fb, item, 14, current ? 0x50 : 0x98);
         char chapter[96];
-        if (book_chapter_title(mark->chapter, chapter, sizeof(chapter)) != ESP_OK)
-            snprintf(chapter, sizeof(chapter), "第 %u 节", (unsigned)mark->chapter + 1);
+        if (book_chapter_title(mark->chapter, chapter, sizeof(chapter)) != ESP_OK) chapter[0] = 0;  // 无名页不编造标签（上游 a370528）
         char where[52];
         if (mark->chapter == s_chapter)
             snprintf(where, sizeof(where), "第 %u 页", (unsigned)book_layout_page_for_offset(mark->byte_off) + 1);
@@ -3600,6 +3741,9 @@ static void free_book(void) {
     e0470_page_turn_release();
     s_water_turn_pending = false;
     s_reader_turn_pending = s_reader_text_frame = false;
+    /* 自动旋转收尾（2026-10-25）：关书时姿态基准作废；传感器休眠在 book_on_exit
+     * 处理（free_book 无 ctx，wake 只发生在自动模式且 ctx->sensor_ready 时）。 */
+    reader_auto_rotate_reset();
     pending_progress_t* pending = pending_find(s_path);
     if (pending && !pending->dirty) pending_discard(s_path);
     invalidate_prep();
@@ -3793,8 +3937,8 @@ static bool load_chapter_at(app_ctx_t* ctx, size_t chapter, size_t offset,
     if (book_kind() == BOOK_KIND_EPUB && loaded.len) {
         // 已识别的正文编号题头优先；没有时沿用书内导航或备用标题。
         // Prefer a recognized numbered body heading, then authored navigation or a fallback title.
-        if (book_chapter_title(chapter, toc_title, sizeof(toc_title)) != ESP_OK)
-            snprintf(toc_title, sizeof(toc_title), "第 %u 节", (unsigned)chapter + 1);
+        // 已识别的正文编号题头优先；没有就不画题头，不用「第 N 节」占位（上游 a370528）。
+        if (book_chapter_title(chapter, toc_title, sizeof(toc_title)) != ESP_OK) toc_title[0] = 0;
         copy_text(heading, sizeof(heading), toc_title);
         char *chapter_mark = strstr(heading, "章");
         if (chapter_mark && chapter_mark - heading < 24) {
@@ -3901,8 +4045,7 @@ static bool load_chapter_at(app_ctx_t* ctx, size_t chapter, size_t offset,
              book_layout_page_for_offset(anchor || source_offset != SIZE_MAX ? anchor_offset : offset);
     s_jump_offset = anchor || source_offset != SIZE_MAX ? anchor_offset : SIZE_MAX;
     s_jump_page = s_page;
-    if (book_chapter_title(chapter, s_title, sizeof(s_title)) != ESP_OK)
-        snprintf(s_title, sizeof(s_title), "第 %u 节", (unsigned)chapter + 1);
+    if (book_chapter_title(chapter, s_title, sizeof(s_title)) != ESP_OK) s_title[0] = 0;  // 无名页留空（上游 a370528）
     copy_text(s_font_path, sizeof(s_font_path), ttf_font_path());
     s_message[0] = 0;
     unlock_draw();
@@ -4059,6 +4202,11 @@ static bool open_book_impl(app_ctx_t* ctx, const char* path) {
     s_session_read_ms = s_session_turns = 0;
     s_reader_notice[0] = 0;
     s_turns = s_unsaved = 0;
+    /* 自动旋转（2026-10-25）：进阅读页重置判定基准；解锁状态唤醒加速度计
+     * （默认低功耗，仅此场景常开），关书/离开时由 free_book 送回睡眠。 */
+    reader_auto_rotate_reset();
+    if (!app_settings_book_rotate_locked() && ctx->sensor_ready && ctx->acc)
+        read_pico_sensor_wake(ctx->acc);
     pending_mark_latest(s_path);
     save_progress();
     // 打开即重新上书架：移出书架只隐藏条目，重新读这本书就是它该在架上的信号。
@@ -4698,6 +4846,8 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     if (s_unsaved < 8) ++s_unsaved;
     if (s_unsaved >= 8 && !s_save_failed) save_progress();
     ESP_LOGI(TAG, "turn chapter=%u page=%u/%u pct=%u", (unsigned)s_chapter, (unsigned)s_page + 1, (unsigned)book_layout_page_count(), percent(s_page));
+    /* 自动旋转静默（2026-10-25）：翻页动作后短暂不判姿态，防操作中途翻转。 */
+    s_auto_rot.hold_until_ms = (int64_t)ctx->now_ms + ROTATE_SETTLE_MS;
     /* v3（用户 2026-10-19，提速）：普通翻页改 DU 差分——E0470_WAVEFORM 自带阈值 DU 表，
      * present 的 AREA 分支直接走 update_display_area_with(…, MODE_DU, …)，翻页耗时显著下降。
      * 残影治理沿用既有机制：reader_full_pages 自动全刷（s_reader_cleanup→GC16 整屏）、
@@ -4708,7 +4858,16 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
     s_water_turn_pending = !chrome_changed && redraw == APP_REDRAW_AREA && !s_reader_cleanup &&
                            app_settings_reader_turn_effect() == 1 && from_text_frame &&
                            book_layout_page_image_count(s_page) == 0 && !app_settings_book_background_path()[0];
-    s_water_turn_dir = dir > 0 ? E0470_TURN_RTL : E0470_TURN_LTR;
+    /* v2 四方向水波纹（2026-10-25 用户：扫向按屏幕方向刷新）：内容横轴在
+     * 非竖屏档不再对应面板横轴——tap 映射实锤（6409 注释）：档1 横屏内容
+     * 右侧=面板底部、档3 相反、档2 倒竖屏左右互换。下一页=自内容右缘向
+     * 左扫，故：竖屏 RTL / 倒竖屏 LTR / 横屏 BTT / 倒横屏 TTB。 */
+    switch (app_settings_book_orientation()) {
+    case 1:  s_water_turn_dir = dir > 0 ? E0470_TURN_BTT : E0470_TURN_TTB; break;
+    case 2:  s_water_turn_dir = dir > 0 ? E0470_TURN_LTR : E0470_TURN_RTL; break;
+    case 3:  s_water_turn_dir = dir > 0 ? E0470_TURN_TTB : E0470_TURN_BTT; break;
+    default: s_water_turn_dir = dir > 0 ? E0470_TURN_RTL : E0470_TURN_LTR; break;
+    }
     return chrome_changed ? APP_REDRAW_PAGE : redraw;
 }
 static app_redraw_t resize_text(app_ctx_t* ctx, int dir) {
@@ -4844,17 +5003,23 @@ static app_redraw_t reader_manual_refresh(app_ctx_t* ctx) {
 
 /* v2 屏幕方向切换（用户 2026-10-19）：0=竖屏 1=横屏 2=竖屏倒转 3=横屏倒转。
  * 横屏族几何变化→重排整章保位（竖屏族 0↔2 几何相同，重排无害保位一致）；
- * 旋转 fb 需整屏收敛。工具栏/系统 UI 不随方向变化（常态竖屏叠加）。 */
+ * 旋转 fb 需整屏收敛。工具栏/系统 UI 不随方向变化（常态竖屏叠加）。
+ * 保位=v4 分页期钉锚（2026-10-26 真机反馈三连修定稿）：v1 页首取整锚单向漂移；
+ * v2 中点锚仍漂半页；v3 构建后插边界的锚页被钉在自然网格近处→锚页大片空白
+ * （用户实测“只显示这一段”）。v4 改为构建前 set_pin_offset 注入：分页到锚处
+ * 收尾前一页（锚前行在锚字节截断），锚起整页自然重流——锚页首行精确不变且
+ * 填满整页；锚被插图跨越时退化自然分页（一次量化，不累积）。 */
 static app_redraw_t apply_reader_orientation(app_ctx_t* ctx, uint8_t orientation) {
     (void)ctx;
     if (!s_text || orientation > 3 || orientation == app_settings_book_orientation()) return APP_REDRAW_NONE;
     uint8_t previous = app_settings_book_orientation();
     lock_draw();
-    size_t off = book_layout_page_start_offset(s_page);
+    size_t off = book_layout_page_start_offset(s_page);   /* 旧页首=精确锚 */
     invalidate_prep();
     app_settings_set_book_orientation(orientation);
     apply_chapter_lead(s_chapter_heading_title, s_chapter_heading_label, s_chapter_lead_skip,
                        s_chapter_lead_row_height);
+    book_layout_set_pin_offset(off);   /* 分页期钉锚：锚页从旧页首精确起并自然填满 */
     bool ok = book_layout_build_blocks(s_text, s_text_len, s_blocks, s_block_count, body_rect(), s_px);
     if (ok) s_page = book_layout_page_for_offset(off);
     else {
@@ -5320,12 +5485,19 @@ static app_redraw_t reader_panel_action(app_ctx_t* ctx, uint16_t x, uint16_t y) 
     }
     if (s_reader_panel == READER_PANEL_ORIENTATION) {
         /* v2 屏幕方向（用户 2026-10-19）：与阅读设置同尺寸面板；返回键/完成回上级，
-         * 点四宫格立即切换（apply_reader_orientation 内部含重排保位与整屏收敛）。 */
+         * 点四宫格立即切换（apply_reader_orientation 内部含重排保位与整屏收敛）。
+         * v3（用户 2026-10-25）：「旋转锁定」开关与四宫格并存——自动模式下点宫格
+         * 仍立即生效（传感器基准跟随重置）。 */
         if (y < reading_settings_top()) s_reader_panel = READER_PANEL_NONE;
         else if (ui_rect_hit((EpdRect){32, reading_settings_top() + 25, 64, 64}, x, y))
             s_reader_panel = READER_PANEL_REFRESH_SETTINGS;
         else if (ui_rect_hit((EpdRect){36, 1141, 612, 58}, x, y))
             s_reader_panel = READER_PANEL_REFRESH_SETTINGS;
+        else if (ui_rect_hit(orientation_lock_card(), x, y)) {
+            bool locked = !app_settings_book_rotate_locked();
+            app_settings_set_book_rotate_locked(locked);
+            reader_auto_rotate_reset();   /* 状态切换：姿态基准重置，防止拿旧基准立即翻转 */
+        }
         else {
             for (int i = 0; i < 4; ++i) {
                 if (!ui_rect_hit(orientation_card(i), x, y)) continue;
@@ -6067,6 +6239,10 @@ static void book_on_exit(app_ctx_t* ctx) {
     ui_reader_background_release();
     free(s_backgrounds); s_backgrounds = NULL; s_background_count = 0;
     free_book();
+    /* 自动旋转（2026-10-25）：离开图书页送回传感器睡眠——wake 只在自动模式且
+     * sensor_ready 时发生，这里对称处理（唤醒过才休眠，避免动默认低功耗状态）。 */
+    if (!app_settings_book_rotate_locked() && ctx->sensor_ready && ctx->acc)
+        read_pico_sensor_sleep(ctx->acc);
     free(s_next_fb);
     s_next_fb = NULL;
     if(s_prep_task){vTaskDelete(s_prep_task);s_prep_task=NULL;}
@@ -6595,6 +6771,11 @@ static app_redraw_t on_tick(app_ctx_t* ctx) {
     else {
         int tap = book_reader_tap_tick(&s_reader_tap, ctx->now_ms, ctx->touch && ctx->touch->touched);
         if (tap) return turn_page(ctx, tap);
+    }
+    /* 自动旋转（2026-10-25）：判定放翻页 tap 之后——翻页动作本身会拉长静默期。 */
+    {
+        app_redraw_t rotated = reader_auto_rotate_tick(ctx);
+        if (rotated != APP_REDRAW_NONE) return rotated;
     }
     track_ticket_stats(ctx);
     if (s_view == SEARCH || s_view == EDIT) {

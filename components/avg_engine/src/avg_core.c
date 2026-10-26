@@ -326,6 +326,17 @@ static uint32_t run(avg_core_t* c) {
         case AVG_CMD_SAY:
         case AVG_CMD_THINK:
             if (c->replaying) { ++c->st.pc; break; }
+            /* voicemap 自动跟随（2026-10-23 用户：立绘跟着说话人切换）：
+             * SAY 说话人在映射表内且与当前 R 槽不同 → 原地换立绘并报
+             * DIRTY_CHAR（平台层做场景区局部刷新；同说话人零开销）。 */
+            if (cmd->type == AVG_CMD_SAY) {
+                const avg_voice_map_t* vm = avg_script_voice(c->script, cmd->s1);
+                if (vm && strcmp(vm->file, c->char_files[2]) != 0) {
+                    copy_fit(c->char_files[2], sizeof(c->char_files[0]), vm->file);
+                    c->char_side[2] = AVG_SIDE_R;
+                    dirty |= AVG_DIRTY_CHAR;
+                }
+            }
             begin_say(c, c->st.pc);
             return dirty | AVG_DIRTY_DIALOG;
         case AVG_CMD_TESTIMONY:

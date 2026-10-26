@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -41,6 +42,52 @@ static void ensure_dirs(void) {
 /* 一个分类包条目：包名（zip 去扩展名）+ 形态。 */
 typedef struct { char name[48]; bool zip; bool pad; } pkg_item_t;
 
+/* UTF-8 安全截断（不劈开多字节序列）。 */
+static void utf8_trunc(char* s, size_t max) {
+    size_t n = strlen(s);
+    if (n <= max) return;
+    n = max;
+    while (n && ((unsigned char)s[n] & 0xc0) == 0x80) --n;
+    s[n] = 0;
+}
+
+/* 包显示名：读 script.txt 的 case 标题（最后一条生效，引擎同语义）。
+ * zip：从 .gcache/<名>/script.txt 读（挂载过的包必然已解出；未挂载的
+ * 首扫显示原名，进一次后即有标题）。目录包：直读 <目录>/script.txt。
+ * 栈预算（2026-10-26 真机爆栈修复）：本函数运行在 gc_pkg_scan 主任务
+ * 8KB 栈内逐包调用，旧版 path[GC_PATH_MAX=512]+line[256]+best[128]≈900B
+ * 叠加 items[8] 后把 ui_fill_round_rect 顶穿栈（LoadProhibited 列表页）。
+ * 现改 path[256]（实际卡内路径 <200B）+ line[160]，单次 ≤450B。 */
+static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
+    char path[256];
+    if (it->zip) snprintf(path, sizeof(path), GCACHE_ROOT "/%s/script.txt", it->name);
+    else snprintf(path, sizeof(path), GAMES_ROOT "/%s/script.txt", it->name);
+    FILE* f = fopen(path, "r");
+    if (f) {
+        char line[160], best[128] = {0};
+        while (fgets(line, sizeof(line), f))
+            if (strncmp(line, "case ", 5) == 0) {
+                char* q1 = strchr(line + 5, '"');
+                if (q1) {
+                    char* q2 = strchr(q1 + 1, '"');
+                    if (q2) {
+                        size_t n = (size_t)(q2 - q1 - 1);
+                        if (n >= sizeof(best)) n = sizeof(best) - 1;
+                        memcpy(best, q1 + 1, n);
+                        best[n] = 0;
+                    }
+                }
+            }
+        fclose(f);
+        if (best[0]) {
+            snprintf(out, cap, "%s", best);
+            utf8_trunc(out, cap - 1);
+            return;
+        }
+    }
+    snprintf(out, cap, "%s", it->name);
+}
+
 /* 收集分类包；稳定排序 zip 在前、目录在后（同前缀下 zip 优先，挂载确定）。 */
 static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
     const char* prefix = gc_cat_prefix(cat);
@@ -49,10 +96,11 @@ static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
     DIR* d = opendir(GAMES_ROOT);
     if (!d) return 0;
     struct dirent* e;
+    char full[256];   /* 循环外复用（2026-10-26 爆栈修复）：卡内路径 <200B，512B 浪费主任务栈 */
     while ((e = readdir(d)) != NULL && n < slots) {
-        if (strncmp(e->d_name, prefix, plen) != 0 || e->d_name[plen] != '-') continue;
-        char full[GC_PATH_MAX];
-        snprintf(full, sizeof(full), GAMES_ROOT "/%.250s", e->d_name);
+        /* 前缀大小写不敏感（2026-10-23：用户 TF 上出现过 AVGR-* 大写命名）。 */
+        if (strncasecmp(e->d_name, prefix, plen) != 0 || e->d_name[plen] != '-') continue;
+        snprintf(full, sizeof(full), GAMES_ROOT "/%.200s", e->d_name);
         struct stat st;
         if (stat(full, &st) != 0) continue;
         bool is_zip = strstr(e->d_name, ".zip") != NULL && S_ISREG(st.st_mode);
@@ -82,8 +130,12 @@ int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots) {
     pkg_item_t items[GC_PKG_SLOTS];
     int n = pkg_collect(cat, items, slots);
     memset(out, 0, (size_t)n * capacity);
-    for (int i = 0; i < n; ++i)
-        snprintf(out + (size_t)i * capacity, capacity, "%s", items[i].name);
+    for (int i = 0; i < n; ++i) {
+        char disp[96];
+        pkg_display_name(&items[i], disp, sizeof(disp));
+        utf8_trunc(disp, capacity - 1);
+        snprintf(out + (size_t)i * capacity, capacity, "%s", disp);
+    }
     return n;
 }
 

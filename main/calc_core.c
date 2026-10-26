@@ -165,13 +165,13 @@ void calc_core_press(const char* key) {
         s_expr[0] = 0;
         return;
     }
-    /* 数字键 */
+    /* 数字键（2026-10-25 用户：保留前导零——按 0 8 显示 "08"，按 0000 显示
+     * "0000"；顺带修复 0000 这类 PIN 无法输入（解锁闸按 4 位数字判断）。
+     * 数值语义不变：strtod("0008")=8。上限 16 位：显示区 pitch=6 时
+     * (6n-1)*6 ≤ 主值宽 604px 的最大整数字长，超长会溢出点阵区。 */
     if (s_fresh) { s_cur[0] = 0; s_fresh = 0; }
-    if (strlen(s_cur) < sizeof(s_cur) - 2) {
-        if (!strcmp(s_cur, "0")) s_cur[0] = 0;
-        strncat(s_cur, key, 1);
-        if (!s_cur[0]) { s_cur[0] = '0'; s_cur[1] = 0; }
-    }
+    if (strlen(s_cur) < 16) strncat(s_cur, key, 1);
+    if (!s_cur[0]) { s_cur[0] = '0'; s_cur[1] = 0; }
 }
 
 /* 表达式点阵化：内部 ASCII 运算符映射回显示符（*→×），其余字符点阵字模直出。

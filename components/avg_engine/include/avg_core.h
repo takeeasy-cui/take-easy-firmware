@@ -61,6 +61,7 @@ enum {
     AVG_DIRTY_TEXT    = 1 << 1,  /* 打字机新增字符（低频跟随即可） */
     AVG_DIRTY_SCENE   = 1 << 2,  /* 背景/立绘变化（建议整屏或场景区） */
     AVG_DIRTY_UI      = 1 << 3,  /* 证言/证据/标题/判决界面变化 */
+    AVG_DIRTY_CHAR    = 1 << 4,  /* 说话人自动切换立绘（场景区局部刷新） */
 };
 
 typedef struct {

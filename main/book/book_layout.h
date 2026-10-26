@@ -96,6 +96,13 @@ size_t book_layout_page_count(void);
 void book_layout_draw_page(uint8_t* fb, size_t page, EpdRect rect, int px);
 /// 查找字节偏移所属页，越界偏移夹到末页。/ Find page containing a byte offset; excessive offsets clamp to the last page.
 size_t book_layout_page_for_offset(size_t off);
+/// 钉锚（一次性）：下一次构建把该字节强制作为页边界——锚前页末行在锚处截断收尾，
+/// 锚起整页自然重流，锚页首行与锚字节精确一致且完整填满；锚被插图跨越时退化自然
+/// 分页。用于旋转/版式变化后保持当前页首不变。构建消费一次后失效。
+/// Pin an exact page boundary for the next build: the tail page ends at the pinned byte and
+/// pages flow naturally from it, so the first line survives re-layouts whole and filled.
+/// One-shot; degrades to natural pagination when an illustration crosses the anchor.
+void book_layout_set_pin_offset(size_t off);
 /// 返回页首原文字节偏移；越界页返回文本长度。/ Return source byte offset at page start; invalid pages return text length.
 size_t book_layout_page_start_offset(size_t page);
 

@@ -8,6 +8,8 @@
  *   char 0|1|2 char_file.png L|C|R 0|1   立绘槽位/文件/站位/是否聚焦
  *   char_off 0|1|2
  *   say "说话人" "文本" | think "文本"
+ *   voicemap "说话人" "立绘.png"          说话人→立绘映射（元数据不计命令；
+ *                                        同名重复声明=覆盖，用于分章换装）
  *   gain_ev evidence_id                  加入证物簿（证据表见下）
  *   ev id "名称" "描述"                  定义证据（脚本头部集中定义）
  *   testimony "证言标题"                 开始证言面板
@@ -32,6 +34,11 @@ extern "C" {
 #endif
 
 typedef struct {
+    char name[48];               /* 说话人名（与 say 第一引号段全等匹配） */
+    char file[96];               /* 立绘文件名（裸名即可，路径由平台层回退解析） */
+} avg_voice_map_t;
+
+typedef struct {
     /* 解析产物（cmds 按实量 PSRAM 分配并在解析完成时收缩——2026-10-18：
      * 固定 AVG_MAX_CMDS 数组吃 ~800KB，case1 仅 108 条利用率 10%，
      * 是推理游戏期间 PSRAM 峰值的主源（字体 open 被挤掉→用户字体被拉黑
@@ -43,6 +50,8 @@ typedef struct {
     int            label_count;
     avg_evidence_t evidence[AVG_MAX_EVIDENCE];
     int            evidence_count;
+    avg_voice_map_t voice_maps[AVG_MAX_VOICE_MAP];  /* 说话人→立绘（同名覆盖） */
+    int            voice_map_count;
     char case_id[24];
     char case_title[128];
 
@@ -65,6 +74,9 @@ int avg_script_label(const avg_script_t* s, const char* name);
 
 /// 证据 id → 索引；-1 未知。
 int avg_script_evidence(const avg_script_t* s, const char* id);
+
+/// 说话人 → 立绘映射；NULL=未映射（平台层据此自动跟随说话人切换立绘）。
+const avg_voice_map_t* avg_script_voice(const avg_script_t* s, const char* name);
 
 #ifdef __cplusplus
 }

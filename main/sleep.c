@@ -322,67 +322,156 @@ static void lock_clock_minute_paint(uint8_t *fb) {
 
 /* 透明书封（阅星瞳语义，v1.8）：PNG 在电脑端抠好图上传，设备把它盖在当前画面上——
  * 非透明像素按 alpha 合成覆盖、透明处透出原界面（不清屏）。未选书封时回退信息面板。 */
-/* 透明书封（阅星瞳语义）：内嵌默认图版（灰8+alpha8 双平面）。解压后
- * 逐像素与当前画面按 alpha 合成 —— a≥250 直接覆盖、其余线性混合，透明处透出原画面。 */
-static bool lock_cover_default(uint8_t *fb) {
-    const int W = 684, H = 1216;
-    const size_t plane = (size_t)W * H;
-    uint8_t *buf = heap_caps_malloc(plane * 2, MALLOC_CAP_SPIRAM);
-    if (!buf) return false;
-    uLongf inflated = (uLongf)(plane * 2);
-    bool ok = uncompress(buf, &inflated, cover_default_bin_z_start,
-        (uLong)(cover_default_bin_z_end - cover_default_bin_z_start)) == Z_OK &&
-        inflated == plane * 2;
-    if (ok) {
-        const uint8_t *gray = buf, *alpha = buf + plane;
-        for (int y = 0; y < H; ++y)
-            for (int x = 0; x < W; ++x) {
-                const size_t i = (size_t)y * W + x;
-                const uint8_t a = alpha[i];
-                if (!a) continue;
-                if (a >= 250) { epd_draw_pixel(x, y, gray[i], fb); continue; }
-                const uint8_t byte = fb[(size_t)y * W / 2 + x / 2];
-                const uint8_t base = (x & 1) ? (byte & 0xf0) : ((byte & 0x0f) << 4);
-                const uint8_t v = (uint8_t)((gray[i] * (uint32_t)a +
-                    (uint32_t)base * (255u - a) + 127) / 255);
-                epd_draw_pixel(x, y, v, fb);
+/* ---- 锁屏/开锁提速（2026-10-25，参照上游 rc98「按行读取与缓存合成」与 rc100「透明书封
+ * 缓存及锁屏恢复优化」思路，用户反馈透明书封锁屏/开锁都慢）----
+ * a) 双平面（684×1216 灰8+alpha8）解码一次后常驻 PSRAM（浅睡不掉电；深睡/重启自然
+ *    归零），按 路径+大小+mtime 失效——稳态锁屏砍掉每次 libpng 流式全解码（主因）；
+ * b) 合成改半字节直写（原实现每像素一次 epd_draw_pixel 调用+坐标旋转变换开销）；
+ * c) 锁定前快照当前页帧（416KB PSRAM），开锁整帧还原，主循环跳过整页重绘——
+ *    app_lock_snapshot_swap；传输恢复延后到首帧之后（app_lock_resume_pending_run）。 */
+#define LOCK_COVER_W  684
+#define LOCK_COVER_H  1216
+static uint8_t *s_cov_gray, *s_cov_alpha;   /* 用户书封双平面缓存 */
+static char s_cov_key_path[288];
+static long s_cov_key_size, s_cov_key_mtime;
+static bool s_cov_ok;
+static uint8_t *s_def_planes;               /* 内嵌默认书封双平面缓存 */
+static bool s_def_ok;
+static uint8_t *s_prelock_fb;               /* 锁前页面快照（开锁还原用） */
+static bool s_prelock_valid;
+static bool s_resume_pending;               /* 开锁后待恢复的传输服务 */
+
+/* 取书封双平面：用户图缓存 → 内嵌默认缓存。失败返回 false（回退信息面板）。 */
+static bool lock_cover_planes(const uint8_t **gray, const uint8_t **alpha) {
+    const size_t plane = (size_t)LOCK_COVER_W * LOCK_COVER_H;
+    const char *path = app_settings_coverart_path();
+    struct stat st;
+    if (path[0] && stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+        bool fresh = s_cov_ok && strcmp(path, s_cov_key_path) == 0 &&
+                     st.st_size == s_cov_key_size && st.st_mtime == s_cov_key_mtime;
+        if (!fresh) {
+            if (!s_cov_gray) s_cov_gray = heap_caps_malloc(plane, MALLOC_CAP_SPIRAM);
+            if (!s_cov_alpha) s_cov_alpha = heap_caps_malloc(plane, MALLOC_CAP_SPIRAM);
+            if (s_cov_gray && s_cov_alpha &&
+                book_image_file_cover_layer(path, LOCK_COVER_W, LOCK_COVER_H,
+                                            s_cov_gray, s_cov_alpha)) {
+                snprintf(s_cov_key_path, sizeof(s_cov_key_path), "%s", path);
+                s_cov_key_size = (long)st.st_size;
+                s_cov_key_mtime = (long)st.st_mtime;
+                s_cov_ok = true;
+            } else {
+                s_cov_ok = false;   /* 解码失败/内存不足：本次先走默认，待下轮重试 */
             }
+        }
+        if (s_cov_ok) {
+            *gray = s_cov_gray;
+            *alpha = s_cov_alpha;
+            return true;
+        }
     }
-    free(buf);
-    return ok;
+    if (!s_def_ok) {
+        if (!s_def_planes) s_def_planes = heap_caps_malloc(plane * 2, MALLOC_CAP_SPIRAM);
+        uLongf inflated = (uLongf)(plane * 2);
+        if (s_def_planes &&
+            uncompress(s_def_planes, &inflated, cover_default_bin_z_start,
+                       (uLong)(cover_default_bin_z_end - cover_default_bin_z_start)) == Z_OK &&
+            inflated == plane * 2)
+            s_def_ok = true;
+    }
+    if (s_def_ok) {
+        *gray = s_def_planes;
+        *alpha = s_def_planes + plane;
+        return true;
+    }
+    return false;
+}
+
+/* 双平面按 alpha 合成入 fb。两个版本按需选择（2026-10-25 适配审计）：
+ * - 常态竖屏（INVERTED_PORTRAIT，684×1216 惯例映射）：半字节直写（免逐像素
+ *   epd_draw_pixel 调用/旋转变换，锁屏合成从 ~83 万次函数调用降为内存遍历）；
+ * - 其他旋转档：保守回退逐点路径（旋转映射下直写坐标语义不成立，不猜）。 */
+static void lock_cover_composite_px(uint8_t *fb, const uint8_t *gray, const uint8_t *alpha) {
+    /* 半透明基色按物理布局读（与 epd_draw_pixel 写入路径同几何）：逻辑 (x,y) 在
+     * INVERTED_PORTRAIT 下落物理 (px=y, py=683-x)，fb 行宽 608B。不透明像素
+     * 直接 epd_draw_pixel（自带旋转，任何档位正确）。 */
+    const size_t phys_row_bytes = 1216 / 2;
+    for (int y = 0; y < LOCK_COVER_H; ++y) {
+        const size_t row = (size_t)y * LOCK_COVER_W;
+        const int px = y;
+        for (int x = 0; x < LOCK_COVER_W; ++x) {
+            const uint8_t a = alpha[row + x];
+            if (!a) continue;
+            uint8_t v = gray[row + x];
+            if (a >= 250) { epd_draw_pixel(x, y, v, fb); continue; }
+            const uint8_t byte = fb[(size_t)(683 - x) * phys_row_bytes + (px >> 1)];
+            const uint8_t base = (px & 1) ? (byte & 0xf0) : ((byte & 0x0f) << 4);
+            v = (uint8_t)((v * (uint32_t)a + (uint32_t)base * (255u - a) + 127) / 255);
+            epd_draw_pixel(x, y, v, fb);
+        }
+    }
+}
+/* 双平面按 alpha 合成入 fb。两个版本按需选择（2026-10-25 适配审计）：
+ * - 常态竖屏（INVERTED_PORTRAIT）：半字节直写——fb 是物理布局 1216×684（行宽
+ *   608B），逻辑 (x,y) 经旋转变换落在物理 (px=y 行内列, py=683-x 行)。
+ *   首版误按逻辑 684 宽行写：每行只覆盖物理行前 342B 且错位=真机"断续横线"；
+ * - 其他旋转档：保守回退逐点路径（epd_draw_pixel 自带变换，保正确）。 */
+static void lock_cover_composite(uint8_t *fb, const uint8_t *gray, const uint8_t *alpha) {
+    if (epd_get_rotation() != EPD_ROT_INVERTED_PORTRAIT) {
+        lock_cover_composite_px(fb, gray, alpha);
+        return;
+    }
+    const size_t phys_row_bytes = 1216 / 2;      /* 物理行宽：1216px = 608B */
+    for (int y = 0; y < LOCK_COVER_H; ++y) {     /* 逻辑行 y → 物理列 px = y */
+        const size_t row = (size_t)y * LOCK_COVER_W;
+        const int px = y;
+        for (int x = 0; x < LOCK_COVER_W; ++x) { /* 逻辑列 x → 物理行 py = 683 - x */
+            const uint8_t a = alpha[row + x];
+            if (!a) continue;
+            uint8_t v = gray[row + x];
+            uint8_t* p = &fb[(size_t)(683 - x) * phys_row_bytes + (px >> 1)];
+            if (a < 250) {
+                const uint8_t cur = *p;
+                const uint8_t base = (px & 1) ? (cur & 0xf0) : ((cur & 0x0f) << 4);
+                v = (uint8_t)((v * (uint32_t)a + (uint32_t)base * (255u - a) + 127) / 255);
+            }
+            if (px & 1) *p = (uint8_t)((*p & 0x0f) | (v & 0xf0));
+            else       *p = (uint8_t)((*p & 0xf0) | (v >> 4));
+        }
+    }
+}
+
+/* 锁定前快照当前页帧（仅样式 2：锁屏不清屏，锁屏画面=当前页+书封）。 */
+static void lock_snapshot_take(uint8_t *fb) {
+    const size_t bytes = (size_t)LOCK_COVER_W * LOCK_COVER_H / 2;
+    if (!s_prelock_fb) s_prelock_fb = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+    if (s_prelock_fb) {
+        memcpy(s_prelock_fb, fb, bytes);
+        s_prelock_valid = true;
+    }
+}
+
+bool app_lock_snapshot_swap(uint8_t *fb) {
+    if (!s_prelock_valid || !s_prelock_fb || !fb) return false;
+    s_prelock_valid = false;
+    memcpy(fb, s_prelock_fb, (size_t)LOCK_COVER_W * LOCK_COVER_H / 2);
+    free(s_prelock_fb);           /* 用完即弃：常驻内存只留书封双平面缓存 */
+    s_prelock_fb = NULL;
+    return true;
+}
+
+void app_lock_resume_pending_run(void) {
+    if (!s_resume_pending) return;
+    s_resume_pending = false;
+    read_pico_transfer_resume_after_sleep();
 }
 
 static void lock_cover_overlay(uint8_t *fb) {
-    const char *path = app_settings_coverart_path();
-    if (path[0]) {
-        const int W = 684, H = 1216;
-        const size_t plane = (size_t)W * H;
-        uint8_t *gray = heap_caps_malloc(plane, MALLOC_CAP_SPIRAM);
-        uint8_t *alpha = heap_caps_malloc(plane, MALLOC_CAP_SPIRAM);
-        bool ok = gray && alpha &&
-            book_image_file_cover_layer(path, W, H, gray, alpha);
-        if (ok) {
-            for (int y = 0; y < H; ++y) {
-                for (int x = 0; x < W; ++x) {
-                    const size_t i = (size_t)y * W + x;
-                    const uint8_t a = alpha[i];
-                    if (!a) continue;
-                    if (a >= 250) { epd_draw_pixel(x, y, gray[i], fb); continue; }
-                    const uint8_t byte = fb[(size_t)y * W / 2 + x / 2];
-                    const uint8_t base = (x & 1) ? (byte & 0xf0) : ((byte & 0x0f) << 4);
-                    const uint8_t v = (uint8_t)((gray[i] * (uint32_t)a +
-                        (uint32_t)base * (255u - a) + 127) / 255);
-                    epd_draw_pixel(x, y, v, fb);
-                }
-            }
-        }
-        free(gray);
-        free(alpha);
-        if (ok) return;
+    const uint8_t *gray = NULL, *alpha = NULL;
+    if (lock_cover_planes(&gray, &alpha)) {
+        lock_cover_composite(fb, gray, alpha);   /* 缓存命中：合成即出（2026-10-25） */
+        return;
     }
-    /* v2：未选书封 / 解码失败 → 内嵌默认图叠加；再失败才回退信息面板。 */
-    if (lock_cover_default(fb)) return;
-    /* 回退（未选书封 / 解码失败）：原信息面板。 */
+    /* 回退（未选书封 / 解码失败 / 内存不足）：原信息面板。 */
     struct tm tm_bj = {0};
     bool ok = lock_now_bj(&tm_bj);
     static const char *const wk[] = {"日","一","二","三","四","五","六"};
@@ -794,6 +883,7 @@ void enter_lock_and_sleep(
     /* 2026-10-17 三样式：0=时钟模式（替代阅读票根）、1=壁纸、2=透明书封（替代拼贴，
      * 保留当前阅读画面仅覆盖信息面板）。时钟模式永不交 PMU 深睡。 */
     if (lock_style == 2) {
+        lock_snapshot_take(framebuffer);        /* 2026-10-25：锁前帧快照（开锁免整页重绘） */
         lock_cover_overlay(framebuffer);                 /* 不清屏，直接叠加面板 */
     } else if (lock_style == 3) {
         /* 计算器锁屏（用户 2026-10-19）：白底计算器画面；全点阵零字体依赖。 */
@@ -871,15 +961,18 @@ void enter_lock_and_sleep(
     }
     pico_boot_clear_resume();
     if (lock_pin_enabled()) app_font_end_lock(&lock_font);
-    read_pico_transfer_resume_after_sleep();
+    /* 传输恢复延后（2026-10-25）：解锁路径不再被 WiFi/httpd 同步重启挡住，
+     * 主循环首帧推完后由 app_lock_resume_pending_run() 补上。 */
+    s_resume_pending = true;
 
     // 参考帧和屏幕都归零，回到主循环后由当前页自己画一遍，不必知道是哪一页。
     // Zero the reference frame and the panel; the current page redraws after the loop resumes, without knowing which page it is.
     read_pico_pmu_drain_events();
     epd_poweron();
     /* 2026-10-17：唤醒不再 epd_clear + set_all_white（那又是一次白闪）。
-     * 保留锁屏画面为 highlevel 参考帧；主循环的 display_request_full_refresh +
-     * 页面呈现以单次 GC16 从锁屏图收敛到当前页。 */
+     * 2026-10-25：样式2 有锁前快照时由主循环 app_lock_snapshot_swap 还原锁前帧、
+     * 借已置位的全刷标志单次 GC16 直收敛，跳过整页重绘；无快照（其他样式/
+     * 快照分配失败）保持原路径——display_request_full_refresh + 页面重绘。 */
     read_pico_pmu_drain_events();
     if (ignore_until_ms) {
         *ignore_until_ms = esp_timer_get_time() / 1000 + APP_LOCK_IGNORE_BOOT_MS;

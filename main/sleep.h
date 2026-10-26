@@ -36,6 +36,14 @@ void enter_lock_and_sleep(
     bool reader_background
 );
 
+/// 解锁收尾（2026-10-25）：透明书封锁前快照可用时整帧还原返回 true——调用方跳过整页重绘，
+/// 直接单次全刷收敛回锁前画面；无快照（其他样式/分配失败）返回 false 走常规重绘。
+/// Swap the pre-lock snapshot into fb on unlock (transparent-cover style); true = full restore.
+bool app_lock_snapshot_swap(uint8_t* fb);
+/// 开锁后补办被延后的传输服务恢复（WiFi/httpd），调用点：主循环首帧推送之后；无挂起时零开销。
+/// Run the deferred transfer-service resume after the first post-unlock frame; no-op when none.
+void app_lock_resume_pending_run(void);
+
 /// 主动拼贴锁屏在保存进度/切字体前清白并显示圆锁；不适用于自动休眠、直接关机或升级/上传中。
 /// Show white and a lock badge before manual-lock saves/font changes; not for idle sleep, direct shutdown or active OTA/uploads.
 void app_lock_feedback(EpdiyHighlevelState *hl);

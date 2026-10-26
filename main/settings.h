@@ -188,6 +188,11 @@ void app_settings_set_book_vertical(bool on);
  * book_landscape 兼容保留：=（方向为横屏族，即 1 或 3）。 */
 uint8_t app_settings_book_orientation(void);        /* 0-3 屏幕方向 */
 void app_settings_set_book_orientation(uint8_t orientation);
+/* v3 自动旋转（用户 2026-10-25）：阅读屏幕方向面板新增「旋转锁定」开关，默认锁定；
+ * 解锁后仅在阅读正文页按加速度计姿态自动换向（面板/工具栏/系统 UI 恒竖屏，逻辑同手动）。
+ * NVS 键 bk_rotlk（1=锁 0=自动），仅阅读器消费。 */
+bool app_settings_book_rotate_locked(void);         /* true=锁定（默认） */
+void app_settings_set_book_rotate_locked(bool locked);
 uint8_t app_settings_book_landscape(void);          /* 横屏族（1/3）=1 */
 void app_settings_set_book_landscape(uint8_t on);   /* 兼容壳：映射方向 0/1 */
 typedef enum {

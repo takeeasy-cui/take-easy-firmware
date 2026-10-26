@@ -147,6 +147,27 @@ bool avg_script_parse(avg_script_t* s, const char* text, size_t len) {
             q = read_quoted(q, title, sizeof(title), NULL);
             if (!q) { set_error(s, line_no, "case needs id \"title\""); return false; }
             copy_token(s->case_title, sizeof(s->case_title), title, strlen(title));
+        } else if (!strcmp(kw, "voicemap")) {
+            /* 元数据：说话人→立绘映射，不产生命令。同名重复=覆盖（分章换装）。 */
+            char vname[64], vfile[128];
+            q = read_quoted(q, vname, sizeof(vname), NULL);
+            q = read_quoted(q, vfile, sizeof(vfile), NULL);
+            if (!q || !vname[0] || !vfile[0]) {
+                set_error(s, line_no, "voicemap needs \"说话人\" \"文件\""); return false;
+            }
+            int found = -1;
+            for (int i = 0; i < s->voice_map_count; ++i)
+                if (!strcmp(s->voice_maps[i].name, vname)) { found = i; break; }
+            if (found < 0) {
+                if (s->voice_map_count >= AVG_MAX_VOICE_MAP) {
+                    set_error(s, line_no, "too many voicemap"); return false;
+                }
+                found = s->voice_map_count++;
+                copy_token(s->voice_maps[found].name, sizeof(s->voice_maps[0].name),
+                           vname, strlen(vname));
+            }
+            copy_token(s->voice_maps[found].file, sizeof(s->voice_maps[0].file),
+                       vfile, strlen(vfile));
         } else if (!strcmp(kw, "label")) {
             char name[128];
             q = read_word(q, name, sizeof(name));
@@ -384,4 +405,11 @@ int avg_script_evidence(const avg_script_t* s, const char* id) {
     for (int i = 0; i < s->evidence_count; ++i)
         if (!strcmp(s->evidence[i].id, id)) return i;
     return -1;
+}
+
+const avg_voice_map_t* avg_script_voice(const avg_script_t* s, const char* name) {
+    if (!s || !name || !name[0]) return NULL;
+    for (int i = 0; i < s->voice_map_count; ++i)
+        if (!strcmp(s->voice_maps[i].name, name)) return &s->voice_maps[i];
+    return NULL;
 }
