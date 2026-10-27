@@ -60,7 +60,7 @@ static void utf8_trunc(char* s, size_t max) {
  * path[256]+line[160]，单次 ≤450B。 */
 static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
     char path[256];
-    static const char* files[] = { "story.txt", "script.txt" };
+    static const char* files[] = { "story.txt", "script.txt", "quiz.txt" };
     for (unsigned fi = 0; fi < sizeof(files) / sizeof(files[0]); ++fi) {
         if (it->zip) snprintf(path, sizeof(path), GCACHE_ROOT "/%s/%s", it->name, files[fi]);
         else snprintf(path, sizeof(path), GAMES_ROOT "/%s/%s", it->name, files[fi]);

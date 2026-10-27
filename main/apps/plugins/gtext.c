@@ -25,6 +25,7 @@
 
 #include "game_core.h"
 #include "story_kernel.h"
+#include "quiz_engine.h"
 
 #include "avg_asset.h"
 
@@ -42,9 +43,10 @@
 
 typedef struct {
     sk_state_t*  sk;                       /* PSRAM（脚本+变量+label 表） */
-    avg_assets_t assets;                   /* bg/char 灰度+蒙版 LRU 缓存 */
+    quiz_engine_t* quiz;                  /* 题库模式（包内 quiz.txt；NULL=叙事模式） */
+    avg_assets_t assets;                   /* bg/char 灰度+莱版 LRU 缓存 */
     sk_out_t     cur;                      /* 最近暂停事件 */
-    int          pause_line;               /* 暂停行 : 存档/恢复重放当前句（不跳句） */
+    int          pause_line;               /* 暂停行：存档/恢复重放当前句（不跳句） */
     bool         choosing;
     bool         ended;                    /* 结局终页 */
     char         save_path[192];
@@ -252,6 +254,7 @@ static void paint_scene(gtext_state_t* s, gc_ctx_t* g, uint8_t* fb) {
 static void paint(gc_ctx_t* g, uint8_t* fb) {
     gtext_state_t* s = (gtext_state_t*)g->state;
     if (!s) { gc_ui_nopkg(fb, "对话游戏", GC_CAT_TEXT); return; }
+    if (s->quiz) { quiz_paint(s->quiz, fb); return; }          /* 题库模式 */
 
     if (s->ended) {                         /* 结局页（* ending 文案或无名 * end） */
         ui_clear_page(fb);
@@ -282,6 +285,11 @@ static gc_ev_t ev_area(gc_ctx_t* g, EpdRect a) { g->area = a; g->want_full = fal
 static gc_ev_t input(gc_ctx_t* g, const ui_gesture_event_t* ev) {
     gtext_state_t* s = (gtext_state_t*)g->state;
     if (ev->type != UI_GESTURE_TAP) return GC_EV_NONE;
+    if (s->quiz) {                                              /* 题库模式 */
+        if (quiz_tap(s->quiz, (int)ev->x0, (int)ev->y0))
+            return ev_area(g, (EpdRect){0, 0, 684, 1216});
+        return GC_EV_NONE;
+    }
 
     if (s->ended) {                         /* 结局 → 回标题（重跑） */
         sk_restart(s->sk);
@@ -308,6 +316,12 @@ static gc_ev_t input(gc_ctx_t* g, const ui_gesture_event_t* ev) {
 
 static gc_ev_t key(gc_ctx_t* g, int k) {
     if (k != UI_KEY_1) return GC_EV_NONE;
+    gtext_state_t* s = (gtext_state_t*)g->state;
+    if (s->quiz) {
+        if (quiz_middle_key(s->quiz))
+            return ev_area(g, (EpdRect){0, 0, 684, 1216});
+        return GC_EV_NONE;
+    }
     ui_gesture_event_t tap = { .type = UI_GESTURE_TAP, .x0 = 342, .y0 = 900 };
     return input(g, &tap);
 }
@@ -322,6 +336,18 @@ static bool launch(gc_ctx_t* g, const char* title_arg) {
     if (!s) return false;
     g->state = s;
     if (!g->pkg_dir[0]) return true;        /* 无包：paint 画引导页 */
+
+    /* 题库模式优先：包内 quiz.txt（每包二者居一）。 */
+    char qpath[256];
+    snprintf(qpath, sizeof(qpath), "%s/quiz.txt", g->pkg_dir);
+    FILE* probe = fopen(qpath, "r");
+    if (probe) {
+        fclose(probe);
+        char ppath[192];
+        snprintf(ppath, sizeof(ppath), "%s/.quizprog", g->pkg_dir);
+        s->quiz = quiz_load(qpath, ppath);
+        if (s->quiz) return true;
+    }
 
     s->sk = (sk_state_t*)heap_caps_calloc(1, sizeof(sk_state_t),
                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -344,6 +370,7 @@ static bool launch(gc_ctx_t* g, const char* title_arg) {
 static void quit(gc_ctx_t* g) {
     gtext_state_t* s = (gtext_state_t*)g->state;
     if (!s) return;
+    if (s->quiz) { quiz_free(s->quiz); }
     if (s->sk) { sk_free(s->sk); heap_caps_free(s->sk); }
     avg_assets_release(&s->assets);
     free(s);

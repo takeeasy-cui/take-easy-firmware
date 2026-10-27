@@ -124,6 +124,7 @@ idf_component_register(
         "game/game_pkg.c"
         "game/game_host_ui.c"
         "game/story_kernel.c"
+        "game/quiz_engine.c"
         "apps/plugins/gtext.c"
         "apps/plugins/gnovel.c"
         "apps/app_gtext.c"
