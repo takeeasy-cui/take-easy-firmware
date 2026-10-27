@@ -1,0 +1,93 @@
+// text-demo2 — Story Engine v1 引擎演示包（对话游戏）
+// 覆盖新命令：变量四则/条件跳/直跳式选项/立绘/背景/多结局/标志收集
+* title 深夜书屋
+
+* bg 书屋
+* char 0 店主 C 1
+
+> 深夜的巷子尽头，有一家还亮着灯的旧书屋。
+> 你推门进去，风铃响了一声，店主从书堆后面抬起头。
+
+* say 店主 这么晚了还来逛书屋？你是今天第一位客人。
+
+* set 警觉 = 0
+* set 信任 = 0
+
+* choice 随便看看->browse|问店主有没有旧地图->ask_map|问这家店开多久了->ask_age
+
+* label browse
+* say 店主 慢慢看，别碰倒书堆就行。
+> 你在书架间穿行，指尖划过一排排泛黄的书脊。
+> 有一本书的书脊上，隐约刻着一行小字。
+* set 警觉 = 警觉 + 1
+* goto next1
+
+* label ask_map
+* say 店主 旧地图？那种东西早就没人要了。
+> 但他的目光，往柜台下面闪了一下。
+* set 信任 = 信任 + 1
+* goto next1
+
+* label ask_age
+* say 店主 这家店啊……比你爷爷的爷爷年纪还大。
+> 他说这话时，笑得很平静。
+* set 警觉 = 警觉 + 2
+* goto next1
+
+* label next1
+* char 0 店主 C 0
+
+> 店主给你倒了杯热茶。茶香很浓，但你总觉得哪里不太对劲。
+
+* ifgoto 警觉 >= 2 watch_carefully
+* ifgoto 信任 >= 1 trust_path
+* goto casual_chat
+
+* label watch_carefully
+> 你注意到：店主的影子，比他本人晚了半拍才动。
+* set 警觉 = 警觉 + 1
+* goto tea
+
+* label trust_path
+> 你接过茶，慢慢喝了一口。店主似乎松了口气。
+* goto tea
+
+* label casual_chat
+> 你和店主聊了几句天气。他说的每个字都对，但语气冷得像在背书。
+* goto tea
+
+* label tea
+* char 1 少女 L 1
+* say 少年 （角落里传来一个声音）你也看得见那行小字吗？
+> 你猛地回头。书架的阴影里，坐着一个抱着旧书的少女。
+
+* choice 结账离开->leave_early|和少女说话->talk_girl|追问店主影子的事->ask_shadow
+
+* label leave_early
+* ending 你匆匆离开书屋。第二天再来时，那条巷子里只有一堵墙。——【结局一：错过】
+* label talk_girl
+* say 少女 每一个能看见那行字的人，最后都留在了这里。
+* say 少女 但你可以试试出去——把地图带上，走后门。
+* set 信任 = 信任 + 2
+* goto finale
+* label ask_shadow
+* say 店主 影子的事，你不必在意。
+> 他的声音突然变得很远，像是从很多年前传来的。
+* set 警觉 = 警觉 + 2
+* goto finale
+
+* label finale
+* clear
+* char 0 店主 C 1
+* say 店主 天快亮了。你要留下，还是要走？
+
+* ifgoto 信任 >= 2 good_end
+* ifgoto 警觉 >= 3 bad_end
+* goto normal_end
+
+* label good_end
+* ending 少女把地图塞进你手里，笑了笑。你推开书屋后门，走进了清晨的阳光里。——【结局二：晨光】
+* label bad_end
+* ending 你的影子，也慢了半拍。——【结局三：留下】
+* label normal_end
+* ending 你走出书屋，回头看时，灯还亮着。也许下次再来，也许再也不来。——【结局四：寻常夜】

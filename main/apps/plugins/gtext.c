@@ -50,6 +50,7 @@ typedef struct {
     avg_assets_t assets;                   /* bg/char 灰度+蒙版 LRU 缓存 */
     sk_out_t     cur;                      /* 最近暂停事件 */
     int          shown;                    /* 打字机字节进度 */
+    int          pause_line;               /* 暂停行：存档/恢复重放当前句（不跳句） */
     bool         choosing;
     bool         ended;                    /* 结局终页 */
     char         save_path[192];
@@ -164,10 +165,11 @@ static void run_to_pause(gtext_state_t* s) {
     s->choosing = false;
     s->ended = false;
     for (;;) {
+        int prev = s->sk->pc;             /* 暂停行（存档/恢复重放该句） */
         sk_event_t ev = sk_step(s->sk, &s->cur);
-        if (ev == SK_EV_TEXT) { s->shown = 0; s->last_ms = 0; return; }
-        if (ev == SK_EV_CHOICE) { s->choosing = true; s->shown = 0; return; }
-        if (ev == SK_EV_END || ev == SK_EV_EOF) { s->ended = true; return; }
+        if (ev == SK_EV_TEXT)  { s->pause_line = prev; s->shown = 0; s->last_ms = 0; return; }
+        if (ev == SK_EV_CHOICE) { s->pause_line = prev; s->choosing = true; s->shown = 0; return; }
+        if (ev == SK_EV_END || ev == SK_EV_EOF) { s->pause_line = prev; s->ended = true; return; }
         /* SK_EV_NONE：副作用已消化，继续 */
     }
 }
@@ -179,7 +181,10 @@ static void save(gtext_state_t* s) {
     FILE* f = fopen(s->save_path, "w");
     if (!f) return;
     char buf[512];
+    int keep = s->sk->pc;                  /* 存暂停行：恢复时重放当前句（不跳句） */
+    s->sk->pc = s->pause_line;
     sk_save(s->sk, -1, buf, sizeof(buf));
+    s->sk->pc = keep;
     fprintf(f, "%s\n", buf);
     fclose(f);
 }
@@ -353,7 +358,7 @@ static bool launch(gc_ctx_t* g, const char* title_arg) {
 
     run_to_pause(s);
     if (!s->sk->title[0]) snprintf(s->sk->title, sizeof(s->sk->title), "%s", g->pkg_name);
-    if (restore(s)) { s->shown = 0; run_to_pause(s); }
+    if (restore(s)) { s->shown = 0; }      /* restore 内已重放暂停句；不再二次推进 */
     return true;
 }
 
