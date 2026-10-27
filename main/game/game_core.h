@@ -42,6 +42,7 @@ typedef enum {
     GC_CAT_TEXT,       /* 对话游戏（story_kernel + 对话框流渲染，text- 前缀） */
     GC_CAT_NOVEL,      /* 互动小说（story_kernel + book_layout 分页渲染，novel- 前缀） */
     GC_CAT_BBK,        /* 步步高电子词典游戏（伏魔记）【M5，暂移出入口】 */
+    GC_CAT_QUIZ,       /* 习测（应知应会题库，quiz- 前缀；quiz_engine） */
 } gc_cat_t;
 
 /* 分类 → TF 卡包前缀（命名规则的唯一事实来源）。 */

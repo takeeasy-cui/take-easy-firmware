@@ -79,6 +79,7 @@ const char* gc_cat_prefix(gc_cat_t cat) {
     case GC_CAT_TEXT: return "text";
     case GC_CAT_NOVEL: return "novel";
     case GC_CAT_BBK:  return "bbk";
+    case GC_CAT_QUIZ: return "quiz";
     default:          return "";
     }
 }

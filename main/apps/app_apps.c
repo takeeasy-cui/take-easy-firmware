@@ -43,11 +43,13 @@ static const app_desc_t* page_files(void) { return app_at(4); }
 static const app_desc_t* page_calc(void) { return app_at(5); }
 extern const app_desc_t app_gtext;
 extern const app_desc_t app_gnovel;
+extern const app_desc_t app_quiz;
 extern const app_desc_t app_notes;
 extern const app_desc_t app_pomodoro;
 extern const app_desc_t app_muyu;
 static const app_desc_t* page_gtext(void)  { return &app_gtext; }
 static const app_desc_t* page_gnovel(void) { return &app_gnovel; }
+static const app_desc_t* page_quiz(void)   { return &app_quiz; }
 static const app_desc_t* page_notes(void) { return &app_notes; }
 static const app_desc_t* page_pomodoro(void) { return &app_pomodoro; }
 static const app_desc_t* page_muyu(void) { return &app_muyu; }
@@ -120,6 +122,18 @@ static void icon_novel(uint8_t* fb, int cx, int cy, uint8_t ink) {
     nothing_thick_line(fb, cx + 6, cy + 6, cx + 16, cy + 4, 3, ink);
 }
 
+static void icon_quiz(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 习测：作业本描边 + 题号列表 + 右下大勾（答题练习语义）。 */
+    EpdRect body = {cx - 17, cy - 21, 34, 42};
+    ui_draw_round_rect(fb, body, 5, ink);
+    ui_draw_round_rect(fb, (EpdRect){body.x + 1, body.y + 1, body.width - 2, body.height - 2}, 4, ink);
+    nothing_thick_line(fb, cx - 12, cy - 13, cx + 6, cy - 13, 3, ink);
+    nothing_thick_line(fb, cx - 12, cy - 4, cx + 2, cy - 4, 3, ink);
+    nothing_thick_line(fb, cx - 12, cy + 5, cx - 2, cy + 5, 3, ink);
+    nothing_thick_line(fb, cx - 5, cy + 13, cx + 1, cy + 19, 5, ink);
+    nothing_thick_line(fb, cx + 1, cy + 19, cx + 14, cy + 2, 5, ink);
+}
+
 static void icon_notes(uint8_t* fb, int cx, int cy, uint8_t ink) {
     /* 便签：圆角卡描边 + 两行内容线 + 右下铅笔斜置（新增/编辑语义）。 */
     EpdRect body = {cx - 17, cy - 20, 34, 40};
@@ -153,7 +167,7 @@ static void icon_muyu(uint8_t* fb, int cx, int cy, uint8_t ink) {
     epd_fill_circle(cx + 20, cy + 21, 6, ink, fb);
 }
 
-static const apps_entry_t k_entries[8] = {
+static const apps_entry_t k_entries[9] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
     {"计算器", icon_calc, page_calc, true},
@@ -162,6 +176,7 @@ static const apps_entry_t k_entries[8] = {
     {"木鱼", icon_muyu, page_muyu, true},
     {"对话游戏", icon_story, page_gtext, true},
     {"互动小说", icon_novel, page_gnovel, true},
+    {"习测", icon_quiz, page_quiz, true},
 };
 
 static EpdRect cell_rect(int index) {
