@@ -54,6 +54,18 @@ def write_rgba_png(path: str, w: int, h: int, pixels) -> None:
     with open(path, 'wb') as f:
         f.write(png)
 
+# ---------------- g8 写出（设备直读格式：头 10B + w*h 灰 + 1bit 蒙版） ----------------
+
+def write_g8(path: str, w: int, h: int, gray, mask=None) -> None:
+    """EVG8\x01 + u16le w + u16le h + u8 flags(bit0=有蒙版) + w*h 灰 + 蒙版。"""
+    flags = 1 if mask is not None else 0
+    hdr = b'EVG8\x01' + struct.pack('<HHB', w, h, flags)
+    with open(path, 'wb') as f:
+        f.write(hdr)
+        f.write(bytes(gray))
+        if mask is not None:
+            f.write(bytes(mask))
+
 # ---------------- 简易画布（最近邻缩放 + PPM 读入） ----------------
 
 def read_ppm(path: str):
@@ -101,39 +113,41 @@ def main():
     os.makedirs(os.path.join(out, 'images', 'bg'), exist_ok=True)
     os.makedirs(os.path.join(out, 'images', 'char'), exist_ok=True)
 
-    # ------- 图片烘焙 -------
+    # ------- 图片烘焙（2026-10-27 v2：设备原生尺寸，零重采样） -------
+    # 背景：node 侧已按 684×513 块采样渲染（像素画块升采样，保留抖动网点）
+    # → 灰度 16 档 → 原尺寸 PNG（设备端原尺寸直读，不再缩放）。 
     bg_files = [f for f in os.listdir(os.path.join(dump, 'bgs')) if f.endswith('.ppm')]
     for f in bg_files:
         w, h, body = read_ppm(os.path.join(dump, 'bgs', f))
-        assert (w, h) == (320, 240), f
-        gray = bytearray(320 * 240)
-        for i in range(320 * 240):
+        assert (w, h) == (684, 513), f
+        gray = bytearray(684 * 513)
+        for i in range(684 * 513):
             r, g, b = body[i * 3], body[i * 3 + 1], body[i * 3 + 2]
             lum = (r * 299 + g * 587 + b * 114) // 1000
             gray[i] = quant16(lum)
-        scaled = scale_nearest(gray, 320, 240, 684, 513, 1)
-        write_gray_png(os.path.join(out, 'images', 'bg', f[:-4] + '.png'), 684, 513, scaled)
+        write_gray_png(os.path.join(out, 'images', 'bg', f[:-4] + '.png'), 684, 513, gray)
 
-    # 精灵：rows 字符画 → RGBA ×3 最近邻；day + night(__n) 双变体（夜=反相鬼影）。
-    S = 3
+    # 精灵：行画 ×k 整数放大（最大整数 ≤470×640 满箱），g8 + 1bit 蒙版。
+    # day/night 双变体（夜=反相鬼影）；设备端 fread 直读：零解码零重采样零糊。 
     for sid, spr in sprites.items():
         w, h, rows = spr['w'], spr['h'], spr['rows']
-        variants = [('', 0x30, 0xEC), ('__n', 0xD8, 0x18)]
-        for suffix, ink, paper in variants:
-            W, H = w * S, h * S
-            px = bytearray(W * H * 4)
-            for y in range(H):
-                row = rows[y // S]
-                for x in range(W):
-                    ch = row[x // S]
-                    o = (y * W + x) * 4
-                    if ch == 'K':
-                        px[o] = px[o + 1] = px[o + 2] = ink
-                        px[o + 3] = 255
-                    elif ch == 'P':
-                        px[o] = px[o + 1] = px[o + 2] = paper
-                        px[o + 3] = 255
-            write_rgba_png(os.path.join(out, 'images', 'char', sid + suffix + '.png'), W, H, px)
+        k = max(2, min(470 // w, 640 // h)) if w and h else 2
+        W, H = w * k, h * k
+        bpr = (W + 7) // 8
+        for suffix, ink, paper in (('', 0x30, 0xEC), ('__n', 0xD8, 0x18)):
+            gray = bytearray(W * H)
+            mask = bytearray(H * bpr)
+            for dy in range(H):
+                row = rows[dy // k]
+                base = dy * bpr
+                for dx in range(W):
+                    cx = dx // k
+                    ch = row[cx] if cx < len(row) else ' '
+                    if ch == ' ':
+                        continue
+                    gray[dy * W + dx] = ink if ch == 'K' else paper
+                    mask[base + (dx >> 3)] |= 1 << (7 - (dx & 7))
+            write_g8(os.path.join(out, 'images', 'char', f'{sid}{suffix}.g8'), W, H, gray, mask)
 
     # ------- 剧本线性化 -------
     lines_out = [f'* title {args.title}', '']
@@ -303,7 +317,7 @@ def main():
     n_text = sum(1 for l in lines_out if l.startswith('> ') or l.startswith('* say '))
     print(f"story.txt: {len(story)} B / {len(lines_out)} 行")
     print(f"场景 {len(order)} ｜ 标签 {n_labels}（上限 512）｜ 正文 {n_text} 句")
-    print(f"背景 {len(bg_files)} 张（684×513）｜ 精灵 {len(sprites)}×2 变体")
+    print(f"背景 {len(bg_files)} 张（684×513 原生直读）｜精灵 {len(sprites)}×2 g8（带透明蒙版）")
     if warn:
         print('⚠ 告警：')
         for w in warn[:20]:

@@ -26,14 +26,19 @@ void gc_ui_dialog_frame(uint8_t* fb, int top) {
 
 void gc_ui_name_tag(uint8_t* fb, int top, const char* name) {
     if (!name || !name[0]) return;
-    ui_fill_round_rect(fb, (EpdRect){48, top + 20, 176, 46}, 10, GC_INK);
-    ui_text_vc(fb, 136, top + 43, 22, name, EPD_DRAW_ALIGN_CENTER, true);
+    /* 骑缝对话框顶线（2026-10-27 用户反馈：原 top+20 的黑签压在正文首行）。
+     * 标签上移到 top-30..top+16，骑在 3px 顶线上，正文从 top+46 起，零遮挡。 */
+    ui_fill_round_rect(fb, (EpdRect){48, top - 30, 176, 46}, 10, GC_INK);
+    ui_text_vc(fb, 136, top - 7, 22, name, EPD_DRAW_ALIGN_CENTER, true);
 }
 
 void gc_ui_button(uint8_t* fb, EpdRect r, const char* label, bool dark) {
     ui_fill_round_rect(fb, r, 10, dark ? GC_INK : 0xff);
     if (!dark) ui_draw_round_rect(fb, r, 10, GC_INK);
-    ui_text_vc(fb, r.x + r.width / 2, r.y + r.height / 2, 18, label,
+    /* 长选项自适应字号（2026-10-27：应知应会 30+ 字选项 18px 会溢出 444 按钮）。 */
+    int est = (int)(strlen(label) / 3);          /* 按 3B/汉字粗估字数 */
+    int px = est > 28 ? 13 : est > 19 ? 15 : 18;
+    ui_text_vc(fb, r.x + r.width / 2, r.y + r.height / 2, px, label,
                EPD_DRAW_ALIGN_CENTER, dark);
 }
 

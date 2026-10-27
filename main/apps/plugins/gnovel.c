@@ -1,15 +1,15 @@
 /*
  * gnovel.c — 互动小说插件（novel-<name>.zip / 目录，包根 story.txt）。
  *
- * Story Engine v1 的 novel 渲染端（M2，2026-10-26）：脚本执行共用
- * main/game/story_kernel.c；本文件把暂停点之间的正文攒成章节文本流，
- * 交给 book_layout 分页（书字体链路/AA/进度全白拿），选择点暂停出选项。
+ * Story Engine v1 的 novel 渲染端：脚本执行共用 story_kernel；正文攒成章节流
+ * 交给 book_layout 分页（书字体/AA/进度全白拿），选择点暂停出选项。
  *
- * 与 game 端（gtext）的差异：
- *  - 阅读：整章攒流 → book_layout 分页 → 上下半屏翻页（书感）；
- *  - 暂停点之间的正文不再逐句打字机，而是一次整章排版；
- *  - 存档存「章节起点 pc + 页码」：恢复时从章节起点重放攒流（副作用幂等），
- *    再跳回存档页——比存行号/字节偏移都稳（渲染端只信重建）。
+ * 2026-10-27 画皮空章根因修复：
+ *  book_layout 是带全局态的模块（竖排/字距/章节题头跳过/字体 runs/插图回调），
+ *  书阅读页残留的态会污染游戏侧排版——"章节题头跳过 skip_bytes"曾把整章正文
+ *  当题头吃空（首进即空章）。现在每次构建前全量复位模块态；
+ *  构建失败/0 页时走位图兜底排版（ui 字库），保证正文永远可见。
+ *  另拒绝越界存档（pc>=行数），坏档视为无档从头开。
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,9 +43,68 @@ typedef struct {
     int           flow_start_pc;         /* 本章节流攒集起点（存档恢复锚） */
     gnovel_phase_t phase;
     bool          choice_pending;         /* 本暂停点是否停在选项 */
+    bool          fb_ok;                  /* book_layout 构建成功（否则兜底排版） */
     size_t        page;
     char          save_path[192];
 } gnovel_state_t;
+
+/* ===================== 兜底排版（book_layout 不可用时） =====================
+ * 章节流按 ≤42 半宽单位（≈21 汉字）折行、24 行/页的位图排版（ui 字库）。
+ * 极少触发：仅 book_layout 构建/页数为 0 时保底。返回总页数；
+ * want_page 页的 24 行写入 ls（ls=NULL 仅计数）。 */
+static char s_fb_lines[24][96];
+
+static size_t fb_paginate(const char* flow, size_t len, size_t want_page,
+                          char ls[24][96], int* out_n) {
+    int collected = 0;
+    if (out_n) *out_n = 0;
+    size_t phys = 0;
+    size_t page_first = want_page * 24, page_last = page_first + 24;
+    size_t i = 0;
+    while (i < len) {
+        size_t j = i;
+        while (j < len && flow[j] != '\n') ++j;
+        if (i == j) {                                       /* 空行 */
+            if (ls && phys >= page_first && phys < page_last) {
+                ls[collected][0] = 0;
+                ++collected;
+            }
+            ++phys;
+        } else {
+            size_t seg = i, k = i;
+            int units = 0;
+            while (k < j) {
+                unsigned char c = (unsigned char)flow[k];
+                int clen = (c & 0x80) ? (((c & 0xf0) == 0xe0) ? 3 : 2) : 1;
+                int cw = (c >= 0x80) ? 2 : 1;
+                if (units + cw > 42) {                      /* 断行 */
+                    size_t n = k - seg; if (n > 95) n = 95;
+                    if (ls && phys >= page_first && phys < page_last) {
+                        memcpy(ls[collected], flow + seg, n);
+                        ls[collected][n] = 0;
+                        ++collected;
+                    }
+                    ++phys;
+                    seg = k; units = 0;
+                } else {
+                    units += cw;
+                    k += (size_t)clen;
+                }
+            }
+            size_t n = j - seg; if (n > 95) n = 95;         /* 行尾冲刷 */
+            if (ls && phys >= page_first && phys < page_last) {
+                memcpy(ls[collected], flow + seg, n);
+                ls[collected][n] = 0;
+                ++collected;
+            }
+            ++phys;
+        }
+        i = j + 1;
+    }
+    size_t pages = phys ? (phys + 23) / 24 : 1;
+    if (out_n) *out_n = collected;
+    return pages;
+}
 
 /* ===================== 章节流攒集与分页 ===================== */
 
@@ -60,7 +119,7 @@ static void flow_append(gnovel_state_t* s, const char* name, const char* text) {
     if (name[0]) snprintf(line, sizeof(line), "%s：%s\n", name, text);
     else snprintf(line, sizeof(line), "%s\n", text);
     size_t n = strlen(line);
-    if (s->flow_len + n + 1 > GNOVEL_FLOW_CAP) return;   /* 超上限静默截断（256KB/章足够） */
+    if (s->flow_len + n + 1 > GNOVEL_FLOW_CAP) return;   /* 超上限静默截断 */
     memcpy(s->flow + s->flow_len, line, n);
     s->flow_len += n;
     s->flow[s->flow_len] = 0;
@@ -70,8 +129,34 @@ static EpdRect novel_rect(void) {
     return (EpdRect){32, 40, 620, 1120};
 }
 
+static size_t novel_pages(gnovel_state_t* s) {
+    if (s->fb_ok) {
+        size_t n = book_layout_page_count();
+        return n ? n : 1;
+    }
+    return fb_paginate(s->flow, s->flow_len, (size_t)-1, NULL, NULL);
+}
+
+/* book_layout 模块态全量复位（防书阅读残留污染）。 */
+static void layout_reset(void) {
+    book_layout_set_vertical(false);
+    book_layout_set_runs(NULL, 0);
+    book_layout_set_spacing(100, 50);
+    book_layout_set_typography(0);
+    book_layout_set_first_line_indent(0);
+    book_layout_set_first_line_indent_adjust(0);
+    book_layout_set_reading_line(0);
+    book_layout_set_reading_line_offset(0);
+    book_layout_set_chapter_lead(0, 0);
+    book_layout_set_chapter_lead_width(0);
+    book_layout_set_images_visible(true);
+    book_layout_set_image_dims(NULL, NULL);
+    book_layout_set_image_bleed_width(0);
+}
+
 /* 走剧本到下一暂停点：正文攒进章节流，选择/结局为暂停事件。 */
 static void run_to_pause(gnovel_state_t* s) {
+    layout_reset();                          /* 每章重排前复位（含 restart 路径） */
     flow_reset(s);
     s->choice_pending = false;
     for (;;) {
@@ -80,9 +165,10 @@ static void run_to_pause(gnovel_state_t* s) {
         if (ev == SK_EV_CHOICE) s->choice_pending = true;
         break;                              /* CHOICE / END / EOF 均为本章暂停点 */
     }
-    /* build 失败（>4096 页等）时 book_layout 内部清空布局 → 空章一页，可继续。 */
     book_layout_free();
-    book_layout_build(s->flow, s->flow_len, novel_rect(), GNOVEL_PX);
+    bool ok = book_layout_build(s->flow, s->flow_len, novel_rect(), GNOVEL_PX);
+    s->fb_ok = ok && book_layout_page_count() > 0;
+    if (!s->fb_ok) printf("GN: layout fallback (%d B chapter)\n", (int)s->flow_len);
     s->phase = NS_READ;
     s->page = 0;
 }
@@ -109,8 +195,13 @@ static bool restore(gnovel_state_t* s) {
     fclose(f);
     int page = -1;
     if (!sk_restore(s->sk, line, &page)) return false;
+    if (s->sk->pc >= s->sk->lines) {         /* 越界存档：视为无档，从头开 */
+        sk_restart(s->sk);
+        run_to_pause(s);
+        return false;
+    }
     run_to_pause(s);                        /* sk->pc 已是章节起点：重放攒流 */
-    size_t count = book_layout_page_count();
+    size_t count = novel_pages(s);
     if (count) s->page = (size_t)page < count ? (size_t)page : count - 1;
     if (page < 0) s->page = 0;
     return true;
@@ -140,10 +231,18 @@ static void paint(gc_ctx_t* g, uint8_t* fb) {
         return;
     }
 
-    /* NS_READ：书页排版（book_layout 全权绘制正文区）。 */
+    /* NS_READ：正文页（书排版为主；book_layout 异常时兜底位图排版）。 */
     ui_clear_page(fb);
-    size_t count = book_layout_page_count();
-    book_layout_draw_page(fb, s->page, novel_rect(), GNOVEL_PX);
+    size_t count = novel_pages(s);
+    if (s->fb_ok) {
+        book_layout_draw_page(fb, s->page, novel_rect(), GNOVEL_PX);
+    } else {
+        int n = 0;
+        fb_paginate(s->flow, s->flow_len, s->page, s_fb_lines, &n);
+        for (int r = 0; r < n && r < 24; ++r)
+            if (s_fb_lines[r][0])
+                ui_text_vc(fb, 48, 92 + r * 44, 26, s_fb_lines[r], EPD_DRAW_ALIGN_LEFT, false);
+    }
     char foot[32];
     if (count) snprintf(foot, sizeof(foot), "%d / %d", (int)(s->page + 1), (int)count);
     else strcpy(foot, "1 / 1");
@@ -159,7 +258,7 @@ static void paint(gc_ctx_t* g, uint8_t* fb) {
 static gc_ev_t ev_full(gc_ctx_t* g) { g->area = (EpdRect){0, 0, 684, 1216}; g->want_full = false; return GC_EV_DIRTY; }
 
 static void flip(gnovel_state_t* s, bool forward) {
-    size_t count = book_layout_page_count();
+    size_t count = novel_pages(s);
     if (!count) return;
     if (forward) {
         if (s->page + 1 < count) { ++s->page; save(s); return; }

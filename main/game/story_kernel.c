@@ -277,9 +277,9 @@ void sk_restart(sk_state_t* sk) {
 /* ===================== 步进 ===================== */
 
 sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
-    if (sk->pc >= sk->lines) { out->type = SK_EV_EOF; return SK_EV_EOF; }
+    if (sk->pc >= sk->lines) { out->type = SK_EV_EOF; out->text[0] = 0; return SK_EV_EOF; }
     char* l = line_at(sk, sk->pc);
-    if (!l) { out->type = SK_EV_EOF; return SK_EV_EOF; }
+    if (!l) { out->type = SK_EV_EOF; out->text[0] = 0; return SK_EV_EOF; }
 
     char* arg = NULL;
     ++sk->pc;                               /* 默认本行已消费（跳转会改写 pc） */
@@ -359,6 +359,7 @@ sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
     if (match(l, "* if", &arg)) { exec_if_flag(sk, arg, false); return SK_EV_NONE; }
     if (match(l, "* set", &arg)) { exec_set(sk, arg); return SK_EV_NONE; }
     if (match(l, "* choice", &arg)) {
+        out->name[0] = 0;                    /* 选项页不带名牌（防残留上一句说话人） */
         parse_choice(sk, arg, out);
         out->type = SK_EV_CHOICE;
         return SK_EV_CHOICE;
