@@ -19,6 +19,7 @@
  *
  * 规则（2026-10-27 用户需求）：
  *   - 每次练习从可出题池（未跳过且未毕业）随机洗牌出题；
+ *   - 选项顺序每题随机乱序（比对按原题字母基准，反馈字母翻译为屏面字母）；
  *   - 连续答对 3 次的题毕业，不再出现；答错清零并进错题集；
  *   - 答题页 [跳过此题] 按钮：该题永不再出；
  *   - 菜单 [错题重练]：只从错过的未毕业题随机出。
@@ -97,9 +98,10 @@ struct quiz_engine_s {
     int       cur;
     int       asked, correct, mastered_delta;
     bool      last_correct;
-    char      last_letter[8];               /* 作答字母串（多选可能多个） */
+    char      last_letter[8];               /* 作答字母串（多选可能多个；屏面显示字母） */
     bool      last_master;
-    uint8_t   pick[4];                      /* 多选当前勾选 */
+    uint8_t   pick[4];                      /* 多选当前勾选（显示位次索引） */
+    uint8_t   perm[4];                      /* 显示位次→原选项号（每题随机乱序） */
     bool      multi_armed;                  /* 多选已选至少一项（可确认） */
     int       ex_page;                      /* 解析分页：当前页（0 基） */
     int       ex_pages;                     /* 解析总页数（每页 13 行） */
@@ -220,11 +222,12 @@ quiz_engine_t* quiz_load(const char* quiz_path, const char* prog_path) {
             case 'R': {
                 char r[16];
                 line_copy(e, i, r, sizeof(r));
-                /* 解析 R：单字母=单选；多字母=多选；T/F/对/错/√/×=判断 */
+                /* 解析 R：字母升序归一（乱序作答比对与反馈翻译的公共基准）；
+                 * 单字母=单选；多字母=多选；T/F/对/错/√/×=判断 */
                 int nn = 0;
-                for (const char* p = r; *p && nn < 4; ++p)
-                    if (*p >= 'A' && *p <= 'D') cur->correct[nn++] = *p;
-                    else if (*p >= 'a' && *p <= 'd') cur->correct[nn++] = (char)(*p - 32);
+                for (char c = 'A'; c <= 'D' && nn < 4; ++c)
+                    if (strchr(r, c) || strchr(r, (char)(c + 32)))
+                        cur->correct[nn++] = c;
                 cur->correct[nn] = 0;
                 if (nn >= 2) { cur->multi = 1; break; }   /* 多选 */
                 if (nn == 0) {                         /* 判断：R 对 / R 错 / T / F / √ / × */
@@ -352,12 +355,18 @@ static void session_start(quiz_engine_t* e, int mode) {
     enter_question(e);
 }
 
-/* 进入新题：复位多选勾选/解析分页，预算动态布局（见前向声明）。 */
+/* 进入新题：复位多选勾选/解析分页，选项随机乱序，预算动态布局。 */
 static void enter_question(quiz_engine_t* e) {
+    const quiz_q_t* q = &e->qs[e->cur];
     memset(e->pick, 0, sizeof(e->pick));
     e->multi_armed = false;
     e->ex_page = 0;
     e->ex_pages = 0;
+    for (int i = 0; i < 4; ++i) e->perm[i] = (uint8_t)i;
+    for (int i = q->opts - 1; i > 0; --i) {   /* 选项乱序（2026-10-27 用户需求） */
+        int j = (int)(esp_random() % (uint32_t)(i + 1));
+        uint8_t t = e->perm[i]; e->perm[i] = e->perm[j]; e->perm[j] = t;
+    }
     layout_ask(e);
 }
 
@@ -375,9 +384,10 @@ static void advance(quiz_engine_t* e) {
 }
 
 /* ---------------- 动态布局（2026-10-27：题干/选项自适应，长文字不再出屏） ----------------
- * 几何：题头行 y=60；题干中心行 106.. 每 44px（上限 6 行）；选项逐项下排，
- * 高度 = 56+(行数-1)×34（行宽 36 半宽单位=18 汉字，24px 字），间距 12；
- * 多选追加[确认答题]；跳过/菜单行钉底 1080（内容超出时顺延，越界整体上移）。
+ * 几何：题头行 y=60；题干中心行 106.. 每 44px（上限 6 行）；选项组在
+ * 「题干下缘 ↔ 跳过行上缘」区间垂直居中（+24 偏下手势区），选项高度
+ * = 56+(行数-1)×34（行宽 36 半宽单位=18 汉字，24px 字），间距 12；
+ * 多选追加[确认答题]；跳过/菜单行钉底 1080（组超高时顺延，越界整体上移）。
  * 全部位次存 opt_y/opt_h/multi_confirm_y/row_y，paint 与 tap 命中共用，
  * 须在绘制/命中前重算（enter_question 进入每题时调用）。 */
 #define QZ_UNITS_Q   40      /* 题干/解析行宽：20 汉字（26px→520px，x=48 起） */
@@ -390,18 +400,32 @@ static int opt_letter_line(const quiz_q_t* q, int i) {
     return i == 0 ? q->l_a : i == 1 ? q->l_b : i == 2 ? q->l_c : q->l_d;
 }
 
-/* 选项正文串（布局测量与绘制共用同一串，行数必然一致）：单选带 "A. " 前缀；
- * 多选/判断裸文本。返回文字锚 x（判断题与选项按钮中心对齐显示）。 */
+/* 选项正文串（布局测量与绘制共用同一串，行数必然一致）：i=显示位次，
+ * 原选项号=perm[i]；单选带 "A. " 前缀（显示字母），多选/判断裸文本。
+ * 返回文字锚 x（判断题与选项按钮中心对齐显示）。 */
 static int opt_body(const quiz_engine_t* e, const quiz_q_t* q, int i,
                     char* out, size_t cap) {
     char opt[QZ_TEXT];
-    line_copy(e, opt_letter_line(q, i), opt, sizeof(opt));
+    line_copy(e, opt_letter_line(q, e->perm[i]), opt, sizeof(opt));
     if (q->judge) {                          /* 判断：裸“对/错”居中 */
         snprintf(out, cap, "%s", opt);
         return A_OPT_X + A_OPT_W / 2;
     }
     snprintf(out, cap, "%c. %s", 'A' + i, opt);
     return q->multi ? QZ_CHECK_X + 28 + 16 : A_OPT_X + 18;
+}
+
+/* 正确答案转屏面字母（乱序后反馈与用户所见一致；判断题原样文本；
+ * 多选按显示位次升序，如 BCD 顺读）。 */
+static void correct_disp(const quiz_engine_t* e, const quiz_q_t* q,
+                         char* out, size_t cap) {
+    out[0] = 0;
+    if (q->judge) { snprintf(out, cap, "%s", q->correct); return; }
+    size_t n = 0;
+    for (int j = 0; j < 4 && n + 1 < cap; ++j)
+        if (strchr(q->correct, (char)('A' + e->perm[j])))
+            out[n++] = (char)('A' + j);
+    out[n] = 0;
 }
 
 /* 按 units 折行后取第 ln 行（宽度模型与 gc_ui_typewrap_count 一致）。 */
@@ -430,29 +454,47 @@ static void layout_ask(quiz_engine_t* e) {
     int qlines = gc_ui_typewrap_count(qt, QZ_UNITS_Q, 0);
     if (qlines < 1) qlines = 1;
     if (qlines > 6) qlines = 6;
-    int y = 100 + qlines * QZ_LH + 10;
+
+    /* 先测各选项行数 → 组高（选项 + 间距 + 多选确认行，去掉末尾间距）。 */
+    int group_h = 0;
     for (int i = 0; i < q->opts; ++i) {
         opt_body(e, q, i, body, sizeof(body));
         int lines = gc_ui_typewrap_count(body, QZ_UNITS_O, 0);
         if (lines < 1) lines = 1;
         if (lines > 3) lines = 3;              /* 超 3 行截断（安全） */
-        e->opt_y[i] = y;
         e->opt_h[i] = A_OPT_H + (lines - 1) * 34;
+        group_h += e->opt_h[i] + 12;
+    }
+    if (q->multi) group_h += QZ_BH + 12;
+    group_h -= 12;
+
+    /* 可用区间：题干下缘 .. 跳过行上缘。选项组垂直居中（+24 略偏下手势区）；
+     * 用户实测反馈“选项太靠上不好点”（2026-10-27）——短题不再顶着题干排。 */
+    int avail_top = 100 + qlines * QZ_LH + 10 + 16;
+    int avail_bot = A_ROW_BOTTOM - 24;
+    int avail_h = avail_bot - avail_top;
+    int y = (group_h < avail_h) ? avail_top + (avail_h - group_h) / 2 + 24
+                                : avail_top;   /* 放不下：顶格排，底部保护兜底 */
+
+    for (int i = 0; i < q->opts; ++i) {
+        e->opt_y[i] = y;
         y += e->opt_h[i] + 12;
     }
-    if (q->multi) {
-        e->multi_confirm_y = y;
-        y += QZ_BH + 12;
+    if (q->multi) { e->multi_confirm_y = y; y += QZ_BH + 12; }
+    else e->multi_confirm_y = -1;
+
+    /* 跳过/菜单行钉底；组超高时顺延，仍越界再整体上移（极端长题）。 */
+    int last_bot = y - 12;
+    if (last_bot + 24 <= A_ROW_BOTTOM) {
+        e->row_y = A_ROW_BOTTOM;
     } else {
-        e->multi_confirm_y = -1;
-    }
-    e->row_y = y + 24 > A_ROW_BOTTOM ? y + 24 : A_ROW_BOTTOM;
-    /* 底部越界保护：整体上移（极端长题）。 */
-    if (e->row_y + A_OPT_H > 1216 - 26) {
-        int over = e->row_y + A_OPT_H - (1216 - 26);
-        for (int i = 0; i < q->opts; ++i) e->opt_y[i] -= over;
-        if (e->multi_confirm_y >= 0) e->multi_confirm_y -= over;
-        e->row_y -= over;
+        e->row_y = last_bot + 24;
+        if (e->row_y + A_OPT_H > 1216 - 26) {
+            int over = e->row_y + A_OPT_H - (1216 - 26);
+            for (int i = 0; i < q->opts; ++i) e->opt_y[i] -= over;
+            if (e->multi_confirm_y >= 0) e->multi_confirm_y -= over;
+            e->row_y -= over;
+        }
     }
 }
 
@@ -492,16 +534,23 @@ static void answer(quiz_engine_t* e, int opt) {
     e->last_letter[0] = 0;
     if (q->multi) {
         if (opt >= 0) return;                 /* 多选：选项点按只勾选，不走判分 */
-        /* 拼作答串与比对 */
-        char got[8]; int nn = 0;
-        for (int i = 0; i < 4; ++i)
-            if (e->pick[i] && nn < 4) got[nn++] = (char)('A' + i);
+        char got[8]; int nn = 0;              /* 原字母升序（与 correct 同基准） */
+        for (int o = 0; o < 4; ++o)
+            for (int j = 0; j < 4; ++j)
+                if (e->perm[j] == o && e->pick[j] && nn < 4)
+                    got[nn++] = (char)('A' + o);
         got[nn] = 0;
         if (!nn) return;                      /* 未勾选：不判分（防御） */
-        snprintf(e->last_letter, sizeof(e->last_letter), "%s", got);
+        char disp[8]; int dn = 0;             /* 反馈用屏面字母 */
+        for (char c = 'A'; c <= 'D'; ++c)
+            if (strchr(got, c))
+                for (int j = 0; j < 4; ++j)
+                    if (e->perm[j] == c - 'A') { disp[dn++] = (char)('A' + j); break; }
+        disp[dn] = 0;
+        snprintf(e->last_letter, sizeof(e->last_letter), "%s", disp);
         e->last_correct = strcmp(got, q->correct) == 0;
     } else if (q->judge) {
-        bool got_yes = (opt == 0);            /* A=对 错=0?：A 行是对/错按题面 */
+        bool got_yes = (e->perm[opt] == 0);   /* 原 A 行是对/错按题面文本 */
         char got[8];
         char a[24];
         line_copy(e, q->l_a, a, sizeof(a));
@@ -510,9 +559,9 @@ static void answer(quiz_engine_t* e, int opt) {
         snprintf(e->last_letter, sizeof(e->last_letter), "%s", got);
         e->last_correct = !strcmp(got, q->correct);
     } else {
-        char letter = (char)('A' + opt);
-        snprintf(e->last_letter, sizeof(e->last_letter), "%c", letter);
-        e->last_correct = (letter == q->correct[0]);
+        char orig_letter = (char)('A' + e->perm[opt]);
+        snprintf(e->last_letter, sizeof(e->last_letter), "%c", (char)('A' + opt));
+        e->last_correct = (orig_letter == q->correct[0]);
     }
     if (e->last_correct) {
         ++q->streak;
@@ -654,8 +703,9 @@ void quiz_paint(quiz_engine_t* e, uint8_t* fb) {
                 ui_text_vc(fb, 342, 230, 22, "已连对 3 次——本题毕业，不再出现",
                            EPD_DRAW_ALIGN_CENTER, false);
         } else {
-            char w[96];
-            snprintf(w, sizeof(w), "答错了，正确答案 %s", e->qs[e->cur].correct);
+            char cd[8], w[96];
+            correct_disp(e, &e->qs[e->cur], cd, sizeof(cd));
+            snprintf(w, sizeof(w), "答错了，正确答案 %s", cd);
             ui_text_vc(fb, 342, 160, 40, w, EPD_DRAW_ALIGN_CENTER, false);
             ui_text_vc(fb, 342, 230, 22, "已放入错题集，可在菜单重练",
                        EPD_DRAW_ALIGN_CENTER, false);
