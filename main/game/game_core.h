@@ -157,6 +157,8 @@ void gc_ui_title_page(uint8_t* fb, const char* game, const char* sub, bool has_c
 /// 打字机安全折行：text 前 shown 字节按每行 width_units（中文=2）回调 draw(line,y)。
 void gc_ui_typewrap(const char* text, int shown, int max_lines, int width_units,
                     void (*draw)(void* user, const char* line, int y), void* user, int y0, int lh);
+/// 只测折行数不绘制（动态布局用）：返回按宽度折行后的总行数（skip_lines 跳过前 N 行）。
+int  gc_ui_typewrap_count(const char* text, int width_units, int skip_lines);
 /// 灰度图抖动居中贴入区域。
 void gc_ui_blit_gray(uint8_t* fb, const uint8_t* gray, unsigned gw, unsigned gh,
                      int x, int y, unsigned area_w, unsigned area_h);

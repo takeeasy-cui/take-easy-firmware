@@ -81,6 +81,28 @@ void gc_ui_typewrap(const char* text, int shown, int max_lines, int width_units,
     }
 }
 
+/* 只测行数不绘制（quiz 动态布局用）：UTF-8 按 display 宽截断计数。
+ * skip_lines：跳过前 N 行（分页显示从第 skip 行起）；返回实际可计行数（不再截
+ * 于 max_lines——用于计算总分页）。 */
+int gc_ui_typewrap_count(const char* text, int width_units, int skip_lines) {
+    if (!text) return 0;
+    int lines = 0;
+    const char* p = text;
+    while (p[0]) {
+        size_t bytes = 0; int units = 0;
+        while (p[bytes] && units < width_units) {
+            unsigned char c0 = (unsigned char)p[bytes];
+            int len = c0 & 0x80 ? ((c0 & 0xe0) == 0xc0 ? 2 : ((c0 & 0xf0) == 0xe0 ? 3 : 4)) : 1;
+            units += c0 > 0x7f ? 2 : 1;
+            bytes += (size_t)len;
+        }
+        if (!bytes) break;                    /* 防御：零宽死循环 */
+        if (lines++ >= 0 && lines > skip_lines) { /* 计入 skip 后的行 */ }
+        p += bytes;
+    }
+    return lines > skip_lines ? lines - skip_lines : 0;
+}
+
 void gc_ui_blit_gray(uint8_t* fb, const uint8_t* gray, unsigned gw, unsigned gh,
                       int x, int y, unsigned area_w, unsigned area_h) {
     if (!gray || !gw || !gh) return;

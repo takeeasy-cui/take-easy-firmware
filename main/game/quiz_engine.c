@@ -5,9 +5,17 @@
  *   * title 2026应知应会大闯关       标题（列表显示名）
  *   Q 题干
  *   A 选项一 … D 选项四
- *   R C                              正确项字母
+ *   R C / R AB / R 对            正确项：单字母=单选，多字母=多选（全选对才得分），
+ *                                   R 行写“对”或选项为 对/错 = 判断题（两项渲染）
  *   E 解析
  * 进度文件 .quizprog：首行题数，其后每行 "idx streak skipped wronged"。
+ *
+ * 题型（2026-10-27 用户需求：判断题 + 多选题）：
+ *   - 判断题：R 为“对/错/T/F/√/×”或 A/B 选项恰为“对/错”文本 → 渲染 两项；
+ *   - 多选题：R 为 2-4 个字母（如 R ABD）→ 勾选模式，选完[确认答题]；
+ *   - 单选题：R 单字母（原行为）。
+ *   布局自适应：题干 1-6 行、选项文字换行逐项下排、解析超 13 行翻页，
+ *   不再固定 4 行题干/8 行解析（实测截断修复）。
  *
  * 规则（2026-10-27 用户需求）：
  *   - 每次练习从可出题池（未跳过且未毕业）随机洗牌出题；
@@ -24,6 +32,7 @@
 #include "esp_random.h"
 
 #include "ui_kit.h"
+#include "ui_nothing.h"
 
 #include "game_core.h"
 #include "quiz_engine.h"
@@ -34,12 +43,40 @@
 #define QZ_MASTER_STREAK  3
 #define QZ_MASTER_DESC    "连续答对3次毕业"
 
+/* 按钮几何（paint 与 tap 命中共用；逻辑竖屏 684×1216）。 */
+#define QZ_BX   48
+#define QZ_BW   588
+#define QZ_BH   64
+#define M_Y_PRACTICE  600
+#define M_Y_WRONG     692
+#define M_Y_RESET     784
+#define A_OPT_X 54
+#define A_OPT_W 576
+#define A_OPT_H 56
+#define A_ROW_BOTTOM  1080     /* 跳过/菜单行钉底：短题不随内容上跳 */
+#define A_SKIP_X 48
+#define A_SKIP_W 356
+#define A_MENU_X 436
+#define A_MENU_W 200
+#define F_NEXT_X 48
+#define F_NEXT_W 400
+#define F_MENU_X 476
+#define F_MENU_W 160
+#define F_ROW_Y 932
+#define D_MENU_X 142
+#define D_MENU_W 400
+#define D_MENU_Y 800
+#define D_RESET_Y 900
+
 typedef struct {
     int     l_q, l_a, l_b, l_c, l_d, l_e;   /* 行号；-1=缺 */
-    char    correct;                        /* 'A'..'D' */
+    char    correct[5];                      /* 单选:"C\0"；多选:"ABD\0"；判断:"对"/"错" */
+    uint8_t multi;                          /* 1=多选（2-4 个正确项） */
+    uint8_t judge;                          /* 1=判断题（对/错两项） */
     int16_t streak;                         /* 连对次数（3=毕业） */
     uint8_t skipped;                        /* 永不再出 */
     uint8_t wronged;                        /* 曾经答错过（错题集候选） */
+    int8_t  opts;                           /* 渲染选项数：4/2（判断） */
 } quiz_q_t;
 
 struct quiz_engine_s {
@@ -60,11 +97,20 @@ struct quiz_engine_s {
     int       cur;
     int       asked, correct, mastered_delta;
     bool      last_correct;
-    char      last_letter;
+    char      last_letter[8];               /* 作答字母串（多选可能多个） */
     bool      last_master;
+    uint8_t   pick[4];                      /* 多选当前勾选 */
+    bool      multi_armed;                  /* 多选已选至少一项（可确认） */
+    int       ex_page;                      /* 解析分页：当前页（0 基） */
+    int       ex_pages;                     /* 解析总页数（每页 13 行） */
     bool      reset_arm;                    /* 菜单重置二次确认 */
     bool      all_done;                     /* 池空（全部掌握/错题集空） */
     char      note[112];
+    /* ASK 动态布局缓存（paint 与 tap 命中共用；进入题目/选项文字变更时重算） */
+    int       opt_y[4];                     /* 各选项按钮顶 y */
+    int       opt_h[4];                     /* 各选项按钮高 */
+    int       row_y;                        /* 跳过/菜单行 y */
+    int       multi_confirm_y;              /* 多选[确认答题] y（-1=非多选） */
 };
 
 /* ===================== 基础：行访问 / 前缀判定 ===================== */
@@ -160,7 +206,8 @@ quiz_engine_t* quiz_load(const char* quiz_path, const char* prog_path) {
             if (l[1] != ' ') continue;
             if (c0 == 'Q') { ++qi; cur = &e->qs[qi];
                 cur->l_q = i; cur->l_a = cur->l_b = cur->l_c = cur->l_d = cur->l_e = -1;
-                cur->correct = 'A';
+                cur->correct[0] = 'A'; cur->correct[1] = 0;
+                cur->multi = cur->judge = 0; cur->opts = 4;
                 continue;
             }
             if (!cur || qi < 0) continue;
@@ -171,16 +218,49 @@ quiz_engine_t* quiz_load(const char* quiz_path, const char* prog_path) {
             case 'D': cur->l_d = i; break;
             case 'E': cur->l_e = i; break;
             case 'R': {
-                char r[8];
+                char r[16];
                 line_copy(e, i, r, sizeof(r));
-                if (r[0] >= 'A' && r[0] <= 'D') cur->correct = r[0];
-                else if (r[0] >= 'a' && r[0] <= 'd') cur->correct = (char)(r[0] - 32);
+                /* 解析 R：单字母=单选；多字母=多选；T/F/对/错/√/×=判断 */
+                int nn = 0;
+                for (const char* p = r; *p && nn < 4; ++p)
+                    if (*p >= 'A' && *p <= 'D') cur->correct[nn++] = *p;
+                    else if (*p >= 'a' && *p <= 'd') cur->correct[nn++] = (char)(*p - 32);
+                cur->correct[nn] = 0;
+                if (nn >= 2) { cur->multi = 1; break; }   /* 多选 */
+                if (nn == 0) {                         /* 判断：R 对 / R 错 / T / F / √ / × */
+                    bool yes = r[0] == 'T' || r[0] == 't' ||
+                               !strncmp(r, "对", 3) || !strncmp(r, "√", 3);
+                    bool no  = r[0] == 'F' || r[0] == 'f' ||
+                               !strncmp(r, "错", 3) || !strncmp(r, "×", 2);
+                    if (yes) { strcpy(cur->correct, "对"); cur->judge = 1; cur->opts = 2; }
+                    else if (no) { strcpy(cur->correct, "错"); cur->judge = 1; cur->opts = 2; }
+                    /* 未识别的 R 保持单选默认 A：交由 A/B 行文本后验转换 */
+                } else cur->opts = 4;
                 break;
             }
             default: break;
             }
         }
     }
+
+    /* 判断题后验：R 未标但 A/B 行文本恰为“对/错” → 判断题（两项）。 */
+    for (int i = 0; i < e->qcount; ++i) {
+        quiz_q_t* q = &e->qs[i];
+        if (q->judge || q->multi) continue;
+        char a[24], b[24];
+        line_copy(e, q->l_a, a, sizeof(a));
+        line_copy(e, q->l_b, b, sizeof(b));
+         bool a_tf = !strcmp(a, "对") || !strcmp(a, "错") || !strcmp(a, "正确") || !strcmp(a, "错误");
+         bool b_tf = !strcmp(b, "对") || !strcmp(b, "错") || !strcmp(b, "正确") || !strcmp(b, "错误");
+         if (a_tf && b_tf) {
+             q->judge = 1; q->opts = 2;
+             /* 正确项按 R 原字母（默认 A）映射到 对/错 文本。 */
+             bool a_right = !strcmp(a, "对") || !strcmp(a, "正确");
+             char ra = (q->correct[0] >= 'A' && q->correct[0] <= 'D') ? q->correct[0] : 'A';
+             bool pick_a = (ra == 'A') ? a_right : !a_right;
+             strcpy(q->correct, pick_a ? "对" : "错");
+         }
+     }
 
     snprintf(e->prog_path, sizeof(e->prog_path), "%s", prog_path);
 
@@ -246,6 +326,10 @@ static void save_prog(quiz_engine_t* e) {
     fclose(f);
 }
 
+/* 前向：session 流程与进入题目的定义顺序（布局实现在后） */
+static void layout_ask(quiz_engine_t* e);
+static void enter_question(quiz_engine_t* e);
+
 static void session_start(quiz_engine_t* e, int mode) {
     e->mode = mode;
     e->order_count = pool_build(e, mode);
@@ -265,6 +349,16 @@ static void session_start(quiz_engine_t* e, int mode) {
     }
     e->cur = e->order[0];
     e->phase = QZ_ASK;
+    enter_question(e);
+}
+
+/* 进入新题：复位多选勾选/解析分页，预算动态布局（见前向声明）。 */
+static void enter_question(quiz_engine_t* e) {
+    memset(e->pick, 0, sizeof(e->pick));
+    e->multi_armed = false;
+    e->ex_page = 0;
+    e->ex_pages = 0;
+    layout_ask(e);
 }
 
 static void advance(quiz_engine_t* e) {
@@ -277,13 +371,149 @@ static void advance(quiz_engine_t* e) {
     }
     e->cur = e->order[e->order_pos];
     e->phase = QZ_ASK;
+    enter_question(e);
 }
 
+/* ---------------- 动态布局（2026-10-27：题干/选项自适应，长文字不再出屏） ----------------
+ * 几何：题头行 y=60；题干中心行 106.. 每 44px（上限 6 行）；选项逐项下排，
+ * 高度 = 56+(行数-1)×34（行宽 36 半宽单位=18 汉字，24px 字），间距 12；
+ * 多选追加[确认答题]；跳过/菜单行钉底 1080（内容超出时顺延，越界整体上移）。
+ * 全部位次存 opt_y/opt_h/multi_confirm_y/row_y，paint 与 tap 命中共用，
+ * 须在绘制/命中前重算（enter_question 进入每题时调用）。 */
+#define QZ_UNITS_Q   40      /* 题干/解析行宽：20 汉字（26px→520px，x=48 起） */
+#define QZ_UNITS_O   36      /* 选项行宽：18 汉字（留出字母前缀与勾选框） */
+#define QZ_LH        44      /* 题干行高 */
+#define QZ_EX_LINES  13      /* 解析每页行数（中心行 300..828，页脚 868，按钮 932） */
+#define QZ_CHECK_X   68      /* 多选勾选框左上 x */
+
+static int opt_letter_line(const quiz_q_t* q, int i) {
+    return i == 0 ? q->l_a : i == 1 ? q->l_b : i == 2 ? q->l_c : q->l_d;
+}
+
+/* 选项正文串（布局测量与绘制共用同一串，行数必然一致）：单选带 "A. " 前缀；
+ * 多选/判断裸文本。返回文字锚 x（判断题与选项按钮中心对齐显示）。 */
+static int opt_body(const quiz_engine_t* e, const quiz_q_t* q, int i,
+                    char* out, size_t cap) {
+    char opt[QZ_TEXT];
+    line_copy(e, opt_letter_line(q, i), opt, sizeof(opt));
+    if (q->judge) {                          /* 判断：裸“对/错”居中 */
+        snprintf(out, cap, "%s", opt);
+        return A_OPT_X + A_OPT_W / 2;
+    }
+    snprintf(out, cap, "%c. %s", 'A' + i, opt);
+    return q->multi ? QZ_CHECK_X + 28 + 16 : A_OPT_X + 18;
+}
+
+/* 按 units 折行后取第 ln 行（宽度模型与 gc_ui_typewrap_count 一致）。 */
+static void zline_piece(const char* s, int units, int ln, char* out, size_t cap) {
+    out[0] = 0;
+    if (!s) return;
+    const char* p = s;
+    for (int l = 0; l <= ln && p[0]; ++l) {
+        size_t n = 0; int u = 0;
+        while (p[n] && u < units && n + 1 < cap) {
+            unsigned char c0 = (unsigned char)p[n];
+            int len = c0 & 0x80 ? ((c0 & 0xe0) == 0xc0 ? 2 : ((c0 & 0xf0) == 0xe0 ? 3 : 4)) : 1;
+            u += c0 > 0x7f ? 2 : 1;
+            n += (size_t)len;
+        }
+        if (l == ln) { memcpy(out, p, n); out[n] = 0; return; }
+        p += n;
+    }
+}
+
+static void layout_ask(quiz_engine_t* e) {
+    const quiz_q_t* q = &e->qs[e->cur];
+    char body[QZ_TEXT + 16];
+    char qt[QZ_TEXT];
+    line_copy(e, q->l_q, qt, sizeof(qt));
+    int qlines = gc_ui_typewrap_count(qt, QZ_UNITS_Q, 0);
+    if (qlines < 1) qlines = 1;
+    if (qlines > 6) qlines = 6;
+    int y = 100 + qlines * QZ_LH + 10;
+    for (int i = 0; i < q->opts; ++i) {
+        opt_body(e, q, i, body, sizeof(body));
+        int lines = gc_ui_typewrap_count(body, QZ_UNITS_O, 0);
+        if (lines < 1) lines = 1;
+        if (lines > 3) lines = 3;              /* 超 3 行截断（安全） */
+        e->opt_y[i] = y;
+        e->opt_h[i] = A_OPT_H + (lines - 1) * 34;
+        y += e->opt_h[i] + 12;
+    }
+    if (q->multi) {
+        e->multi_confirm_y = y;
+        y += QZ_BH + 12;
+    } else {
+        e->multi_confirm_y = -1;
+    }
+    e->row_y = y + 24 > A_ROW_BOTTOM ? y + 24 : A_ROW_BOTTOM;
+    /* 底部越界保护：整体上移（极端长题）。 */
+    if (e->row_y + A_OPT_H > 1216 - 26) {
+        int over = e->row_y + A_OPT_H - (1216 - 26);
+        for (int i = 0; i < q->opts; ++i) e->opt_y[i] -= over;
+        if (e->multi_confirm_y >= 0) e->multi_confirm_y -= over;
+        e->row_y -= over;
+    }
+}
+
+/* 选项内容：按钮外框由调用方画，这里画多选勾选框与换行文字
+ * （文字区垂直居中于 opt_y/opt_h）。 */
+static void draw_opt_text(uint8_t* fb, const quiz_engine_t* e, int i, bool picked) {
+    const quiz_q_t* q = &e->qs[e->cur];
+    char body[QZ_TEXT + 16];
+    int cx = opt_body(e, q, i, body, sizeof(body));
+    if (q->multi) {
+        int box_y = e->opt_y[i] + e->opt_h[i] / 2 - 14;
+        if (picked) {                       /* 选中：实心黑框 + 白色两笔对勾（app 同款粗线） */
+            ui_fill_round_rect(fb, (EpdRect){QZ_CHECK_X, box_y, 28, 28}, 6, 0x00);
+            int mx = QZ_CHECK_X + 14, my = box_y + 14;
+            nothing_thick_line(fb, mx - 5, my + 1, mx - 1, my + 5, 4, 0xff);
+            nothing_thick_line(fb, mx - 1, my + 5, mx + 7, my - 6, 4, 0xff);
+        } else {
+            ui_draw_round_rect(fb, (EpdRect){QZ_CHECK_X, box_y, 28, 28}, 6, 0x00);
+        }
+    }
+    int lines = gc_ui_typewrap_count(body, QZ_UNITS_O, 0);
+    if (lines < 1) lines = 1;
+    if (lines > 3) lines = 3;
+    int tex_y = e->opt_y[i] + (e->opt_h[i] - lines * 34) / 2 + 17;
+    for (int ln = 0; ln < lines; ++ln) {
+        char piece[QZ_TEXT + 16];
+        zline_piece(body, QZ_UNITS_O, ln, piece, sizeof(piece));
+        if (!piece[0]) break;
+        ui_text_vc(fb, cx, tex_y + ln * 34, 24, piece,
+                   q->judge ? EPD_DRAW_ALIGN_CENTER : EPD_DRAW_ALIGN_LEFT, false);
+    }
+}
+
+/* 作答：单选 opt=0..3；多选时 opt 若为 -1 表示确认作答。 */
 static void answer(quiz_engine_t* e, int opt) {
     quiz_q_t* q = &e->qs[e->cur];
-    char letter = (char)('A' + opt);
-    e->last_letter = letter;
-    e->last_correct = letter == q->correct;
+    e->last_letter[0] = 0;
+    if (q->multi) {
+        if (opt >= 0) return;                 /* 多选：选项点按只勾选，不走判分 */
+        /* 拼作答串与比对 */
+        char got[8]; int nn = 0;
+        for (int i = 0; i < 4; ++i)
+            if (e->pick[i] && nn < 4) got[nn++] = (char)('A' + i);
+        got[nn] = 0;
+        if (!nn) return;                      /* 未勾选：不判分（防御） */
+        snprintf(e->last_letter, sizeof(e->last_letter), "%s", got);
+        e->last_correct = strcmp(got, q->correct) == 0;
+    } else if (q->judge) {
+        bool got_yes = (opt == 0);            /* A=对 错=0?：A 行是对/错按题面 */
+        char got[8];
+        char a[24];
+        line_copy(e, q->l_a, a, sizeof(a));
+        bool a_is_yes = !strcmp(a, "对") || !strcmp(a, "正确");
+        snprintf(got, sizeof(got), "%s", (a_is_yes ? got_yes : !got_yes) ? "对" : "错");
+        snprintf(e->last_letter, sizeof(e->last_letter), "%s", got);
+        e->last_correct = !strcmp(got, q->correct);
+    } else {
+        char letter = (char)('A' + opt);
+        snprintf(e->last_letter, sizeof(e->last_letter), "%c", letter);
+        e->last_correct = (letter == q->correct[0]);
+    }
     if (e->last_correct) {
         ++q->streak;
         ++e->correct;
@@ -296,6 +526,14 @@ static void answer(quiz_engine_t* e, int opt) {
     }
     ++e->asked;
     save_prog(e);
+    /* 解析分页：每页 QZ_EX_LINES 行（FEED 翻页用）。 */
+    {
+        char ex[QZ_EX];
+        line_copy(e, q->l_e, ex, sizeof(ex));
+        e->ex_pages = (gc_ui_typewrap_count(ex, QZ_UNITS_Q, 0) + QZ_EX_LINES - 1)
+                      / QZ_EX_LINES;
+    }
+    e->ex_page = 0;
     e->phase = QZ_FEED;
 }
 
@@ -318,6 +556,19 @@ static void draw26(void* user, const char* line, int y) {
     ui_text_vc((uint8_t*)user, 48, y, 26, line, EPD_DRAW_ALIGN_LEFT, false);
 }
 
+/* 解析分页绘制：typewrap 行回调，仅画当前页 [from, upto) 行（y=300+ln*44）。 */
+typedef struct {
+    uint8_t* fb;
+    int from, upto;
+} feed_pg_t;
+
+static void feed_line(void* user, const char* line, int y) {
+    feed_pg_t* fp = (feed_pg_t*)user;
+    int ln = (y - 300) / QZ_LH;
+    if (ln < fp->from || ln >= fp->upto) return;
+    ui_text_vc(fp->fb, 48, y, 26, line, EPD_DRAW_ALIGN_LEFT, false);
+}
+
 static int mastered_count(const quiz_engine_t* e) {
     int m = 0;
     for (int i = 0; i < e->qcount; ++i)
@@ -336,33 +587,7 @@ static int skipped_count(const quiz_engine_t* e) {
     return s;
 }
 
-/* 菜单/按钮几何（tap 与 paint 共用） */
-#define QZ_BX   48
-#define QZ_BW   588
-#define QZ_BH   64
-#define M_Y_PRACTICE  600
-#define M_Y_WRONG     692
-#define M_Y_RESET     784
-#define A_OPT_X 54
-#define A_OPT_W 576
-#define A_OPT_H 56
-#define A_OPT_Y0 596
-#define A_OPT_STEP 64
-#define A_ROW_Y 892          /* 跳过/菜单 行 */
-#define A_SKIP_X 48
-#define A_SKIP_W 356
-#define A_MENU_X 436
-#define A_MENU_W 200
-#define F_NEXT_X 48
-#define F_NEXT_W 400
-#define F_MENU_X 476
-#define F_MENU_W 160
-#define F_ROW_Y 932
-#define D_MENU_X 142
-#define D_MENU_W 400
-#define D_MENU_Y 800
-#define D_RESET_Y 900
-
+/* 各页绘制（按钮几何宏见文件顶部） */
 void quiz_paint(quiz_engine_t* e, uint8_t* fb) {
     if (e->phase == QZ_MENU) {
         ui_clear_page(fb);
@@ -391,28 +616,30 @@ void quiz_paint(quiz_engine_t* e, uint8_t* fb) {
 
     if (e->phase == QZ_ASK) {
         ui_clear_page(fb);
-        char head[64];
-        snprintf(head, sizeof(head), "第 %d / %d 题 · 本轮已对 %d",
-                 e->order_pos + 1, e->order_count, e->correct);
+        const quiz_q_t* q = &e->qs[e->cur];
+        char head[80];
+        snprintf(head, sizeof(head), "第 %d / %d 题 · 本轮已对 %d · %s题",
+                 e->order_pos + 1, e->order_count, e->correct,
+                 q->multi ? "多选" : q->judge ? "判断" : "单选");
         ui_text_vc(fb, 342, 60, 20, head, EPD_DRAW_ALIGN_CENTER, false);
         char qt[QZ_TEXT];
-        line_copy(e, e->qs[e->cur].l_q, qt, sizeof(qt));
-        gc_ui_typewrap(qt, (int)strlen(qt), 4, 44, draw26, fb, 106, 46);
-        static const char* letters[4] = { "A", "B", "C", "D" };
-        for (int i = 0; i < 4; ++i) {
-            char lab[264];
-            char opt[192];
-            int li = i == 0 ? e->qs[e->cur].l_a
-                  : i == 1 ? e->qs[e->cur].l_b
-                  : i == 2 ? e->qs[e->cur].l_c : e->qs[e->cur].l_d;
-            line_copy(e, li, opt, sizeof(opt));
-            snprintf(lab, sizeof(lab), "%s. %s", letters[i], opt);
-            gc_ui_button(fb, (EpdRect){A_OPT_X, A_OPT_Y0 + i * A_OPT_STEP, A_OPT_W, A_OPT_H},
-                         lab, false);
+        line_copy(e, q->l_q, qt, sizeof(qt));
+        gc_ui_typewrap(qt, (int)strlen(qt), 6, QZ_UNITS_Q, draw26, fb, 106, QZ_LH);
+        for (int i = 0; i < q->opts; ++i) {
+            EpdRect r = {A_OPT_X, e->opt_y[i], A_OPT_W, e->opt_h[i]};
+            bool on = q->multi && e->pick[i];
+            /* 选中=外框保留+内缩加粗圈（系统惯例，不整块填黑以减轻残影）。 */
+            ui_draw_choice_round_rect(fb, r, 10, on);
+            draw_opt_text(fb, e, i, on);
         }
-        gc_ui_button(fb, (EpdRect){A_SKIP_X, A_ROW_Y, A_SKIP_W, A_OPT_H},
+        if (q->multi) {
+            gc_ui_button(fb, (EpdRect){QZ_BX, e->multi_confirm_y, QZ_BW, QZ_BH},
+                         e->multi_armed ? "确认答题" : "请先勾选，再确认",
+                         e->multi_armed);
+        }
+        gc_ui_button(fb, (EpdRect){A_SKIP_X, e->row_y, A_SKIP_W, A_OPT_H},
                      "跳过此题（永不再出）", false);
-        gc_ui_button(fb, (EpdRect){A_MENU_X, A_ROW_Y, A_MENU_W, A_OPT_H}, "菜单", false);
+        gc_ui_button(fb, (EpdRect){A_MENU_X, e->row_y, A_MENU_W, A_OPT_H}, "菜单", false);
         return;
     }
 
@@ -427,18 +654,27 @@ void quiz_paint(quiz_engine_t* e, uint8_t* fb) {
                 ui_text_vc(fb, 342, 230, 22, "已连对 3 次——本题毕业，不再出现",
                            EPD_DRAW_ALIGN_CENTER, false);
         } else {
-            char w[64];
-            snprintf(w, sizeof(w), "答错了，正确答案 %c", e->qs[e->cur].correct);
+            char w[96];
+            snprintf(w, sizeof(w), "答错了，正确答案 %s", e->qs[e->cur].correct);
             ui_text_vc(fb, 342, 160, 40, w, EPD_DRAW_ALIGN_CENTER, false);
             ui_text_vc(fb, 342, 230, 22, "已放入错题集，可在菜单重练",
                        EPD_DRAW_ALIGN_CENTER, false);
         }
         char ex[QZ_EX];
         line_copy(e, e->qs[e->cur].l_e, ex, sizeof(ex));
-        gc_ui_typewrap(ex, (int)strlen(ex), 8, 44, draw26, fb, 300, 44);
+        int from = e->ex_page * QZ_EX_LINES;
+        feed_pg_t fp = { fb, from, from + QZ_EX_LINES };
+        gc_ui_typewrap(ex, (int)strlen(ex), from + QZ_EX_LINES, QZ_UNITS_Q,
+                       feed_line, &fp, 300, QZ_LH);
+        if (e->ex_pages > 1) {
+            char pg[48];
+            snprintf(pg, sizeof(pg), "—— 解析 %d / %d ——", e->ex_page + 1, e->ex_pages);
+            ui_text_vc(fb, 342, 868, 18, pg, EPD_DRAW_ALIGN_CENTER, false);
+        }
         bool last = e->order_pos >= e->order_count - 1;
         gc_ui_button(fb, (EpdRect){F_NEXT_X, F_ROW_Y, F_NEXT_W, QZ_BH},
-                     last ? "查看结果" : "下一题", true);
+                     e->ex_page < e->ex_pages - 1 ? "下一页"
+                     : last ? "查看结果" : "下一题", true);
         gc_ui_button(fb, (EpdRect){F_MENU_X, F_ROW_Y, F_MENU_W, QZ_BH}, "菜单", false);
         return;
     }
@@ -497,16 +733,27 @@ bool quiz_tap(quiz_engine_t* q, int x, int y) {
         return false;
     }
     case QZ_ASK: {
-        for (int i = 0; i < 4; ++i)
-            if (ui_rect_hit((EpdRect){A_OPT_X, A_OPT_Y0 + i * A_OPT_STEP, A_OPT_W, A_OPT_H}, x, y)) {
-                answer(q, i);
+        const quiz_q_t* qq = &q->qs[q->cur];
+        for (int i = 0; i < qq->opts; ++i)
+            if (ui_rect_hit((EpdRect){A_OPT_X, q->opt_y[i], A_OPT_W, q->opt_h[i]}, x, y)) {
+                if (qq->multi) {              /* 多选：勾选/取消，不判分 */
+                    q->pick[i] = !q->pick[i];
+                    q->multi_armed = q->pick[0] || q->pick[1] || q->pick[2] || q->pick[3];
+                } else {
+                    answer(q, i);
+                }
                 return true;
             }
-        if (ui_rect_hit((EpdRect){A_SKIP_X, A_ROW_Y, A_SKIP_W, A_OPT_H}, x, y)) {
+        if (qq->multi && q->multi_confirm_y >= 0 &&
+            ui_rect_hit((EpdRect){QZ_BX, q->multi_confirm_y, QZ_BW, QZ_BH}, x, y)) {
+            if (q->multi_armed) answer(q, -1);  /* 未勾选不确认 */
+            return true;
+        }
+        if (ui_rect_hit((EpdRect){A_SKIP_X, q->row_y, A_SKIP_W, A_OPT_H}, x, y)) {
             skip_cur(q);
             return true;
         }
-        if (ui_rect_hit((EpdRect){A_MENU_X, A_ROW_Y, A_MENU_W, A_OPT_H}, x, y)) {
+        if (ui_rect_hit((EpdRect){A_MENU_X, q->row_y, A_MENU_W, A_OPT_H}, x, y)) {
             q->phase = QZ_MENU;
             return true;
         }
@@ -514,7 +761,8 @@ bool quiz_tap(quiz_engine_t* q, int x, int y) {
     }
     case QZ_FEED: {
         if (ui_rect_hit((EpdRect){F_NEXT_X, F_ROW_Y, F_NEXT_W, QZ_BH}, x, y)) {
-            advance(q);
+            if (q->ex_page < q->ex_pages - 1) ++q->ex_page;  /* 长解析先翻页 */
+            else advance(q);
             return true;
         }
         if (ui_rect_hit((EpdRect){F_MENU_X, F_ROW_Y, F_MENU_W, QZ_BH}, x, y)) {
