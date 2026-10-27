@@ -51,22 +51,33 @@ static void utf8_trunc(char* s, size_t max) {
     s[n] = 0;
 }
 
-/* 包显示名：读 script.txt 的 case 标题（最后一条生效，引擎同语义）。
- * zip：从 .gcache/<名>/script.txt 读（挂载过的包必然已解出；未挂载的
- * 首扫显示原名，进一次后即有标题）。目录包：直读 <目录>/script.txt。
- * 栈预算（2026-10-26 真机爆栈修复）：本函数运行在 gc_pkg_scan 主任务
- * 8KB 栈内逐包调用，旧版 path[GC_PATH_MAX=512]+line[256]+best[128]≈900B
- * 叠加 items[8] 后把 ui_fill_round_rect 顶穿栈（LoadProhibited 列表页）。
- * 现改 path[256]（实际卡内路径 <200B）+ line[160]，单次 ≤450B。 */
+/* 包显示名：读 story.txt/script.txt 的标题行。兼容两代格式：
+ *  - Story Engine v1（text-/novel-）："* title 标题"（取首条）。
+ *  - 旧 avgr 格式："case id \"标题\""（最后一条生效，引擎同语义）。
+ * zip：从 .gcache/<名>/ 读（挂载过的包必然已解出；未挂载的首扫显示原名，
+ * 进一次后即有标题）。目录包：直读 <目录>/ 下。
+ * 栈预算（2026-10-26 真机爆栈修复）：主任务 8KB 栈内逐包调用，
+ * path[256]+line[160]，单次 ≤450B。 */
 static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
     char path[256];
-    if (it->zip) snprintf(path, sizeof(path), GCACHE_ROOT "/%s/script.txt", it->name);
-    else snprintf(path, sizeof(path), GAMES_ROOT "/%s/script.txt", it->name);
-    FILE* f = fopen(path, "r");
-    if (f) {
+    static const char* files[] = { "story.txt", "script.txt" };
+    for (unsigned fi = 0; fi < sizeof(files) / sizeof(files[0]); ++fi) {
+        if (it->zip) snprintf(path, sizeof(path), GCACHE_ROOT "/%s/%s", it->name, files[fi]);
+        else snprintf(path, sizeof(path), GAMES_ROOT "/%s/%s", it->name, files[fi]);
+        FILE* f = fopen(path, "r");
+        if (!f) continue;
         char line[160], best[128] = {0};
-        while (fgets(line, sizeof(line), f))
-            if (strncmp(line, "case ", 5) == 0) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "* title", 7) == 0) {      /* v1：首条生效 */
+                char* t = line + 7;
+                while (*t == ' ') ++t;
+                char* nl = strpbrk(t, "\r\n");
+                if (nl) *nl = 0;
+                if (*t && !best[0]) {                     /* 只记首条 */
+                    snprintf(best, sizeof(best), "%s", t);
+                    utf8_trunc(best, sizeof(best) - 1);
+                }
+            } else if (strncmp(line, "case ", 5) == 0) {  /* 旧：最后一条生效 */
                 char* q1 = strchr(line + 5, '"');
                 if (q1) {
                     char* q2 = strchr(q1 + 1, '"');
@@ -78,6 +89,7 @@ static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
                     }
                 }
             }
+        }
         fclose(f);
         if (best[0]) {
             snprintf(out, cap, "%s", best);
@@ -123,6 +135,12 @@ static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
     return n;
 }
 
+/* ---- zip 展开（函数体在后）；声明前置：gc_pkg_scan 预解用 ---- */
+static long file_size_of(const char* path);
+static bool cache_valid(const char* cache_dir, long zip_size);
+static void wipe_dir(const char* dir, int depth);
+static bool unzip_into(const char* zip_path, const char* dst_dir);
+
 int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots) {
     ensure_dirs();
     if (!out || capacity < 8 || slots <= 0) return 0;
@@ -131,6 +149,19 @@ int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots) {
     int n = pkg_collect(cat, items, slots);
     memset(out, 0, (size_t)n * capacity);
     for (int i = 0; i < n; ++i) {
+        /* zip 缓存未建时先解出（列表页要读 story.txt 取显示名）。
+         * 故事包 ≤ 数百 KB，秒级；超时/失败则显示原名不阻列表。 */
+        if (items[i].zip) {
+            char zip_path[GC_PATH_MAX], cache_dir[GC_PATH_MAX];
+            snprintf(zip_path, sizeof(zip_path), GAMES_ROOT "/%s.zip", items[i].name);
+            snprintf(cache_dir, sizeof(cache_dir), GCACHE_ROOT "/%s", items[i].name);
+            long zsize = file_size_of(zip_path);
+            if (zsize > 0 && !cache_valid(cache_dir, zsize)) {
+                (void)mkdir(cache_dir, 0775);
+                wipe_dir(cache_dir, 0);
+                if (!unzip_into(zip_path, cache_dir)) wipe_dir(cache_dir, 0);
+            }
+        }
         char disp[96];
         pkg_display_name(&items[i], disp, sizeof(disp));
         utf8_trunc(disp, capacity - 1);
