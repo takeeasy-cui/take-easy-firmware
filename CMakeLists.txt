@@ -16,7 +16,7 @@ idf_build_set_property(MINIMAL_BUILD ON)
 if(DEFINED ENV{PICO_PROJECT_VER} AND NOT "$ENV{PICO_PROJECT_VER}" STREQUAL "")
     set(PROJECT_VER "$ENV{PICO_PROJECT_VER}")
 else()
-    set(PROJECT_VER "1.0.3")
+    set(PROJECT_VER "1.0.4")
 endif()
 project(Read_Pico)
 
