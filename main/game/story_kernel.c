@@ -287,6 +287,14 @@ sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
     if (*l == 0 || *l == '#' || *l == '\n' || *l == '\r') return SK_EV_NONE;
 
     if (*l == '>') {                        /* 正文：继承粘性名牌 */
+        /* 2026-10-28 修复：就地截断本行行尾（与 match 同规）。text 缓冲行间只有
+         * '\n' 没有 '\0'，不截断时 strlen(l+1) 会一路数到文件尾——一句旁白把
+         * 后续十几行（混着星号命令原文）整段吸进 out->text，真机表现为
+         * “对话全堆积 + 命令标记原样上屏”。offs 表按原始偏移寻址，截断无副作用。 */
+        char* nl = strchr(l, '\n');
+        if (nl) *nl = 0;
+        char* cr = strchr(l, '\r');
+        if (cr) *cr = 0;
         out->type = SK_EV_TEXT;
         copy_trim(out->name, sizeof(out->name), sk->last_name, strlen(sk->last_name));
         copy_trim(out->text, SK_TEXT_MAX, l + 1, strlen(l + 1));
@@ -294,11 +302,15 @@ sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
     }
 
     if (match(l, "* say", &arg)) {
-        char* sp = strchr(arg, ' ');
+        const char* sp = strchr(arg, ' ');
         if (sp) {
-            *sp = 0;
-            copy_trim(out->name, sizeof(out->name), arg, strlen(arg));
-            char* t = sp + 1;
+            /* 2026-10-28 重放保真修复：原 *sp=0 就地破坏脚本缓冲——launch 的 restore
+             * 重放或结局重开第二次执行本行时，空格已永久变 \0，strchr 找不到，
+             * 名/正文拆分失效（真机实锤：“* say 王生 姑娘…”只显示“王生”，正文全丢；
+             * 名牌三连“王生/女郎/王生”即三句对话各丢正文）。按长度拷贝零缓冲修改，
+             * gtext 存档重放同受益。 */
+            copy_trim(out->name, sizeof(out->name), arg, (size_t)(sp - arg));
+            const char* t = sp + 1;
             while (*t == ' ') ++t;
             copy_trim(out->text, SK_TEXT_MAX, t, strlen(t));
         } else {                            /* * say 文本（无名，罕见） */

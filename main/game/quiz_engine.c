@@ -51,9 +51,9 @@
 #define M_Y_PRACTICE  600
 #define M_Y_WRONG     692
 #define M_Y_RESET     784
-#define A_OPT_X 54
-#define A_OPT_W 576
-#define A_OPT_H 56
+#define A_OPT_X 40
+#define A_OPT_W 604
+#define A_OPT_H 72   /* 2026-10-28 用户实测误触：56→72 加高，行距 12→20，按钮 576→604 加宽 */
 #define A_ROW_BOTTOM  1080     /* 跳过/菜单行钉底：短题不随内容上跳 */
 #define A_SKIP_X 48
 #define A_SKIP_W 356
@@ -463,10 +463,10 @@ static void layout_ask(quiz_engine_t* e) {
         if (lines < 1) lines = 1;
         if (lines > 3) lines = 3;              /* 超 3 行截断（安全） */
         e->opt_h[i] = A_OPT_H + (lines - 1) * 34;
-        group_h += e->opt_h[i] + 12;
+        group_h += e->opt_h[i] + 20;
     }
-    if (q->multi) group_h += QZ_BH + 12;
-    group_h -= 12;
+    if (q->multi) group_h += QZ_BH + 20;
+    group_h -= 20;
 
     /* 可用区间：题干下缘 .. 跳过行上缘。选项组垂直居中（+24 略偏下手势区）；
      * 用户实测反馈“选项太靠上不好点”（2026-10-27）——短题不再顶着题干排。 */
@@ -478,13 +478,13 @@ static void layout_ask(quiz_engine_t* e) {
 
     for (int i = 0; i < q->opts; ++i) {
         e->opt_y[i] = y;
-        y += e->opt_h[i] + 12;
+        y += e->opt_h[i] + 20;
     }
-    if (q->multi) { e->multi_confirm_y = y; y += QZ_BH + 12; }
+    if (q->multi) { e->multi_confirm_y = y; y += QZ_BH + 20; }
     else e->multi_confirm_y = -1;
 
     /* 跳过/菜单行钉底；组超高时顺延，仍越界再整体上移（极端长题）。 */
-    int last_bot = y - 12;
+    int last_bot = y - 20;
     if (last_bot + 24 <= A_ROW_BOTTOM) {
         e->row_y = A_ROW_BOTTOM;
     } else {

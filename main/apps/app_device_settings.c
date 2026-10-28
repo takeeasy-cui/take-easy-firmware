@@ -79,7 +79,8 @@ typedef enum { SETTINGS_MAIN, SETTINGS_WIFI, SETTINGS_TIME,
                SETTINGS_CONFIG, SETTINGS_UPGRADE, SETTINGS_BOOT,
                SETTINGS_POWER_SLEEP, SETTINGS_AUTO_LOCK, SETTINGS_PROFILE, SETTINGS_AVATAR,
                SETTINGS_BLUETOOTH, SETTINGS_BLE_SCAN,
-               SETTINGS_LOCK_PIN, SETTINGS_PIN_ENTRY, SETTINGS_TEXT_EDIT, SETTINGS_GOAL } settings_page_t;
+               SETTINGS_LOCK_PIN, SETTINGS_PIN_ENTRY, SETTINGS_TEXT_EDIT, SETTINGS_GOAL,
+               SETTINGS_CLOCK_LOCK } settings_page_t;
 static settings_page_t s_page;
 static ui_pinpad_t s_pinpad;
 static lock_pin_flow_t s_pinflow;
@@ -236,6 +237,8 @@ static int settings_main_row_height(void) {
 #define SETTINGS_SCROLL_MAX 0
 static char s_editor[96], s_editor_notice[80];
 static ui_text_edit_t s_editor_input;
+/* 2026-10-28：编辑器目标——0=设备名（资料卡）1=锁屏签名（时钟模式选项页）。 */
+static uint8_t s_editor_target;
 static const char *system_font_label(const char *path) {
     if (!path || !path[0]) return "思源黑体";
     const char *name = strrchr(path, '/');
@@ -336,7 +339,18 @@ static void coverscan(void) {   /* v1：透明书封候选（仅 PNG）。 */
 
 static void profile_editor_open(void) {
     /* 状态栏签名功能已删（2026-10-17），编辑器仅设备名。 */
+    s_editor_target = 0;
     snprintf(s_editor, sizeof(s_editor), "%s", app_settings_device_name());
+    ui_text_edit_init(&s_editor_input, s_editor, sizeof(s_editor));
+    s_editor_notice[0] = 0;
+    ui_keyboard_begin(&s_editor_input, false);
+    s_page = SETTINGS_TEXT_EDIT;
+}
+
+/* 2026-10-28：锁屏签名编辑（时钟模式选项页）：空串=清空签名。 */
+static void clock_sig_editor_open(void) {
+    s_editor_target = 1;
+    snprintf(s_editor, sizeof(s_editor), "%s", app_settings_lock_clock_signature());
     ui_text_edit_init(&s_editor_input, s_editor, sizeof(s_editor));
     s_editor_notice[0] = 0;
     ui_keyboard_begin(&s_editor_input, false);
@@ -850,9 +864,10 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         return;
     }
     if (s_page == SETTINGS_TEXT_EDIT) {
-        back_header(fb, "设备名称");
+        back_header(fb, s_editor_target == 1 ? "锁屏签名" : "设备名称");
         ui_text(fb, 642, 95, 24, "完成", EPD_DRAW_ALIGN_RIGHT, false);
-        ui_text(fb, 36, 132, 21, "显示在设置页的资料卡", EPD_DRAW_ALIGN_LEFT, false);
+        ui_text(fb, 36, 132, 21, s_editor_target == 1 ? "显示在时钟锁屏的时间正下方，可清空"
+                                                      : "显示在设置页的资料卡", EPD_DRAW_ALIGN_LEFT, false);
         ui_text_input_draw(fb, &s_editor_input, (EpdRect){36, 168, 612, 82}, 28, false, NULL);
         if (s_editor_notice[0]) ui_text_fixed_vc(fb, 36, 510, 22, s_editor_notice, EPD_DRAW_ALIGN_LEFT, false);
         /* v2（用户 2026-10-19）：输入法不保留导航栏位置——键盘下移到屏底（694..1216），
@@ -1019,10 +1034,11 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         back_header(fb, "锁屏设置");
         section(fb, 96, "选择电源键锁屏后的画面");
         /* v5（用户 2026-10-19）：卡序——壁纸锁屏 → 透明书封 → 时钟模式 → 计算器锁屏（新）。
-         * 时钟卡内嵌「时间以外内容」开关（默认开）：点开关只切内容，点卡其余区域选样式。
-         * 页尾新增「锁屏密码」入口（RC95 原有 SETTINGS_LOCK_PIN 页，用户 2026-10-19）。 */
+         * 2026-10-28（用户真机反馈）：时钟卡改点整卡进选项页（横竖屏/只显示时间/签名），
+         * 行内「时间以外内容」开关删除，与其他卡交互一致。
+         * 页尾「锁屏密码」入口（RC95 原有 SETTINGS_LOCK_PIN 页，用户 2026-10-19）。 */
         const char *labels[] = {"壁纸锁屏", "时钟模式", "透明书封", "计算器锁屏"};
-        const char *details[] = {"使用 TF 卡中的 JPG / PNG 图片", "关闭开关则只显示时间",
+        const char *details[] = {"使用 TF 卡中的 JPG / PNG 图片", "横竖版式 · 只显示时间 · 自定义签名",
                                  "使用 TF 卡中的 PNG 图片", "锁屏后可用计算器，密码按＝解锁"};
         const uint8_t values[] = {1, 0, 2, 3};
         const uint8_t order[] = {0, 2, 1, 3};
@@ -1033,15 +1049,7 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
             settings_card(fb, box, 22, active ? 0xd0 : UI_GRAY_WHITE, 0x70);
             ui_text(fb, 64, box.y + 19, 29, labels[k], EPD_DRAW_ALIGN_LEFT, false);
             ui_text(fb, 64, box.y + 67, 19, details[k], EPD_DRAW_ALIGN_LEFT, false);
-            if (k == 1) {
-                const bool on = app_settings_clock_almanac();
-                EpdRect track = {551, box.y + 46, 69, 39};
-                ui_fill_round_rect(fb, track, 19, on ? 0x58 : 0xc4);
-                int cx = on ? track.x + 49 : track.x + 20;
-                epd_fill_circle(cx, track.y + 19, 16, UI_GRAY_WHITE, fb);
-                epd_draw_circle(cx, track.y + 19, 16, 0x78, fb);
-                if (active) epd_fill_circle(609, box.y + 32, 8, UI_GRAY_BLACK, fb);
-            } else if (active) epd_fill_circle(609, box.y + 56, 8, UI_GRAY_BLACK, fb);
+            if (active) epd_fill_circle(609, box.y + 56, 8, UI_GRAY_BLACK, fb);
         }
         ui_text(fb, 54, 694, 22, "时钟模式永不关机 · 选中的样式可从 TF 卡更换图片", EPD_DRAW_ALIGN_LEFT, false);
         /* 页尾「锁屏密码」入口：RC95 原有锁屏密码页（SETTINGS_LOCK_PIN）。 */
@@ -1049,6 +1057,48 @@ static void render(app_ctx_t *ctx, uint8_t *fb) {
         settings_card(fb, pin_row, 18, UI_GRAY_WHITE, 0x70);
         ui_text_vc(fb, 60, pin_row.y + 39, 24, "锁屏密码", EPD_DRAW_ALIGN_LEFT, false);
         ui_text_vc(fb, 560, pin_row.y + 39, 20, lock_pin_enabled() ? "已开启 ›" : "未设置 ›", EPD_DRAW_ALIGN_RIGHT, false);
+        ui_nav_draw(fb, 3);
+        return;
+    }
+    if (s_page == SETTINGS_CLOCK_LOCK) {
+        /* 2026-10-28 时钟模式选项页（用户需求）：点时钟卡进入（与点壁纸进图片选择同构）。
+         * 三选项：横竖屏 / 只显示时间 / 自定义签名；签名在此编辑，锁屏只负责显示。 */
+        back_header(fb, "时钟模式");
+        section(fb, 96, "选好后在底部启用；右键返回上页");
+        EpdRect r1 = {36, 132, 612, 112};
+        settings_card(fb, r1, 22, UI_GRAY_WHITE, 0x70);
+        ui_text(fb, 64, r1.y + 26, 29, "屏幕方向", EPD_DRAW_ALIGN_LEFT, false);
+        ui_text(fb, 64, r1.y + 72, 19, "锁屏画面的横竖版式", EPD_DRAW_ALIGN_LEFT, false);
+        ui_text_vc(fb, 560, r1.y + 56, 24, app_settings_lock_clock_landscape() ? "横屏 ›" : "竖屏 ›",
+                   EPD_DRAW_ALIGN_RIGHT, false);
+        EpdRect r2 = {36, 266, 612, 112};
+        settings_card(fb, r2, 22, UI_GRAY_WHITE, 0x70);
+        {
+            /* 语义映射：「只显示时间」开 = clock_almanac 关（时间以外内容不显示）。
+             * 2026-10-28（用户真机反馈）：track 开关删除，改状态文字（与屏幕方向卡同构），点整卡切换。 */
+            const bool only_time = !app_settings_clock_almanac();
+            ui_text(fb, 64, r2.y + 26, 29, "只显示时间", EPD_DRAW_ALIGN_LEFT, false);
+            ui_text(fb, 64, r2.y + 72, 19, only_time ? "隐藏日期与黄历，仅大时钟" : "时间下方附日期与黄历",
+                   EPD_DRAW_ALIGN_LEFT, false);
+            ui_text_vc(fb, 560, r2.y + 56, 24, only_time ? "已开启 ›" : "已关闭 ›",
+                       EPD_DRAW_ALIGN_RIGHT, false);
+        }
+        EpdRect r3 = {36, 400, 612, 112};
+        settings_card(fb, r3, 22, UI_GRAY_WHITE, 0x70);
+        ui_text(fb, 64, r3.y + 26, 29, "自定义签名", EPD_DRAW_ALIGN_LEFT, false);
+        {
+            const char *sig = app_settings_lock_clock_signature();
+            char shown[64];
+            snprintf(shown, sizeof(shown), "%s", sig[0] ? sig : "未设置");
+            fit_value(shown, 360);
+            ui_text(fb, 64, r3.y + 72, 19, "显示在锁屏时间的正下方，点此输入", EPD_DRAW_ALIGN_LEFT, false);
+            ui_text_vc(fb, 560, r3.y + 56, 22, shown, EPD_DRAW_ALIGN_RIGHT, false);
+            ui_draw_icon(fb, 625, r3.y + 56, 26, UI_ICON_CHEVRON_RIGHT, UI_GRAY_BLACK);
+        }
+        ui_text(fb, 54, 556, 21, "选项即时保存 · 签名在设置页编辑，锁屏只负责显示", EPD_DRAW_ALIGN_LEFT, false);
+        EpdRect btn = {122, 620, 440, 76};
+        settings_card(fb, btn, 18, UI_GRAY_WHITE, 0x70);
+        ui_text_vc(fb, 342, btn.y + 38, 26, "启用时钟锁屏", EPD_DRAW_ALIGN_CENTER, false);
         ui_nav_draw(fb, 3);
         return;
     }
@@ -1641,7 +1691,11 @@ static app_redraw_t profile_editor_gesture(app_ctx_t *ctx, const ui_gesture_even
     if (ev->type != UI_GESTURE_TAP) return feedback ? profile_editor_paint(ctx, false) : APP_REDRAW_NONE;
     int x = ev->x0, y = ev->y0;
     if (y < 160) {
-        if (x < 160) { ui_keyboard_end(); s_page = SETTINGS_PROFILE; return APP_REDRAW_PAGE; }
+        if (x < 160) {
+            ui_keyboard_end();
+            s_page = s_editor_target == 1 ? SETTINGS_CLOCK_LOCK : SETTINGS_PROFILE;
+            return APP_REDRAW_PAGE;
+        }
         if (x > 510) goto save_text;
     }
     if (ui_text_input_tap(&s_editor_input, (EpdRect){36, 168, 612, 82}, 28,
@@ -1652,6 +1706,12 @@ static app_redraw_t profile_editor_gesture(app_ctx_t *ctx, const ui_gesture_even
 save_text:
     if (ui_keyboard_pending()) {
         snprintf(s_editor_notice, sizeof(s_editor_notice), "请先选择候选字");
+        return APP_REDRAW_PAGE;
+    }
+    if (s_editor_target == 1) {                /* 锁屏签名：空串=清空，保存即回选项页 */
+        app_settings_set_lock_clock_signature(s_editor);
+        ui_keyboard_end();
+        s_page = SETTINGS_CLOCK_LOCK;
         return APP_REDRAW_PAGE;
     }
     if (s_editor[0]) app_settings_set_device_name(s_editor);
@@ -2015,12 +2075,8 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
     }
     if (s_page == SETTINGS_LOCK_STYLE) {
         /* v5 命中：行1=壁纸锁屏(132..244)/行2=透明书封(266..378)/行3=时钟模式(400..512)/
-         * 行4=计算器锁屏(534..646)。时钟卡的「时间以外内容」开关（track 551..620 / y 446..485 外扩）
-         * 优先命中：点它只切换日期/黄历/待办，不影响选样式。页底 1010..1088=锁屏密码入口。 */
-        if (ev->x0 >= 540 && ev->x0 < 630 && y >= 438 && y < 492) {
-            app_settings_set_clock_almanac(!app_settings_clock_almanac());
-            return APP_REDRAW_PAGE;
-        }
+         * 行4=计算器锁屏(534..646)。2026-10-28：时钟卡行内开关删除，点整卡进选项页。
+         * 页底 1010..1088=锁屏密码入口。 */
         if (y >= 132 && y < 244) {
             wallpaper_scan();
             s_pick_cover = false;
@@ -2034,8 +2090,10 @@ static app_redraw_t on_gesture(app_ctx_t *ctx, const ui_gesture_event_t *ev) {
             return APP_REDRAW_PAGE;
         }
         if (y >= 400 && y < 512) {
-            /* v2（用户 2026-10-19）：经样式切换闸——计算器锁屏绑定密码需先验证关闭。 */
-            return apply_lock_style_gated(ctx, 0);
+            /* 2026-10-28：点时钟卡进选项页（横竖屏/只显示时间/签名），与点壁纸进图片
+             * 选择同构。启用在选项页底部。 */
+            s_page = SETTINGS_CLOCK_LOCK;
+            return APP_REDRAW_PAGE;
         }
         if (y >= 534 && y < 646) {
             /* 计算器锁屏：无密码先走 PIN 设置（设完自动切样式3）；已有密码直接启用。 */
@@ -2055,6 +2113,31 @@ if (!lock_pin_enabled()) {
             /* 锁屏密码入口（页最底，用户 2026-10-19）：RC95 原有锁屏密码页。
              * 除计算器锁屏外保持目前锁屏密码使用逻辑。 */
             s_page = SETTINGS_LOCK_PIN;
+            return APP_REDRAW_PAGE;
+        }
+        return APP_REDRAW_NONE;
+    }
+    if (s_page == SETTINGS_CLOCK_LOCK) {
+        /* 选项即时保存；启用按钮走样式切换闸（计算器锁屏绑定密码需先验证）。 */
+        if (y >= 132 && y < 244) {
+            app_settings_set_lock_clock_landscape(!app_settings_lock_clock_landscape());
+            return APP_REDRAW_PAGE;
+        }
+        if (y >= 266 && y < 378) {
+            app_settings_set_clock_almanac(!app_settings_clock_almanac());
+            return APP_REDRAW_PAGE;
+        }
+        if (y >= 400 && y < 512) {
+            clock_sig_editor_open();
+            return APP_REDRAW_PAGE;
+        }
+        if (y >= 620 && y < 696) {
+            if (app_settings_lock_style() != 0) {
+                app_redraw_t r = apply_lock_style_gated(ctx, 0);
+                if (s_page == SETTINGS_CLOCK_LOCK) s_page = SETTINGS_LOCK_STYLE;  /* 未走 PIN 验证则回样式页 */
+                return r == APP_REDRAW_NONE ? APP_REDRAW_PAGE : r;
+            }
+            s_page = SETTINGS_LOCK_STYLE;
             return APP_REDRAW_PAGE;
         }
         return APP_REDRAW_NONE;
@@ -2297,7 +2380,8 @@ static app_redraw_t on_key(app_ctx_t *ctx, int key) {
     }
     if (s_page == SETTINGS_WALLPAPER) { s_page = SETTINGS_LOCK_STYLE; return APP_REDRAW_PAGE; }
     if (s_page == SETTINGS_AVATAR) { s_page = SETTINGS_PROFILE; return APP_REDRAW_PAGE; }
-    if (s_page == SETTINGS_TEXT_EDIT) { ui_keyboard_end(); s_page = SETTINGS_PROFILE; return APP_REDRAW_PAGE; }
+    if (s_page == SETTINGS_TEXT_EDIT) { ui_keyboard_end(); s_page = s_editor_target == 1 ? SETTINGS_CLOCK_LOCK : SETTINGS_PROFILE; return APP_REDRAW_PAGE; }
+    if (s_page == SETTINGS_CLOCK_LOCK) { s_page = SETTINGS_LOCK_STYLE; return APP_REDRAW_PAGE; }
     if (s_page == SETTINGS_LOCK_PIN) { s_page = SETTINGS_LOCK_STYLE; return APP_REDRAW_PAGE; }
     if (s_page == SETTINGS_PROFILE) { s_page = SETTINGS_MAIN; (void)read_pico_transfer_get_saved_wifi(s_main_wifi,&s_main_wifi_saved); settings_prepare_profile(); return APP_REDRAW_PAGE; }
     if (s_page == SETTINGS_TIME_EDIT) { s_page = SETTINGS_TIME; return APP_REDRAW_PAGE; }

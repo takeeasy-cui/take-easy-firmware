@@ -9,7 +9,12 @@
  *  书阅读页残留的态会污染游戏侧排版——"章节题头跳过 skip_bytes"曾把整章正文
  *  当题头吃空（首进即空章）。现在每次构建前全量复位模块态；
  *  构建失败/0 页时走位图兜底排版（ui 字库），保证正文永远可见。
- *  另拒绝越界存档（pc>=行数），坏档视为无档从头开。
+ *  2026-10-28 贴结局残档自愈 + 空章兜底：旧固件（'>'行堆积时代）留下的
+ *  存档若落在结局段附近，恢复重放后几无正文直达 END——玩家一进游戏就撞
+ *  “完”页/空白页。现在重放后无选项直达结局且攒流近空（<128B）视为通关
+ *  残档，从头重开并覆盖存档；攒流为空的章节不再 build 空白阅读页，直达
+ *  选项页/结局页。另每次攒流打一行诊断日志（pc/字节数/事件/页数），
+ *  真机再遇异常可凭串口定位是“攒流空”还是“绘制空”。
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,9 +31,10 @@
 #include "game_core.h"
 #include "story_kernel.h"
 #include "book_layout.h"
+#include "settings.h"          /* 2026-10-28：字号复用书阅读设置（app_settings_book_px） */
 
 #define GNOVEL_FLOW_CAP   (256 * 1024)   /* 章节流 PSRAM 上限 */
-#define GNOVEL_PX         28            /* 正文字号（书阅读同档） */
+#define GNOVEL_PX_FALLBACK 36            /* 设置异常时的兑底字号（正常走书阅读设置 36..72，默认 48） */
 #define GNOVEL_CHOICE_Y0  640
 #define GNOVEL_CHOICE_H    64
 #define GNOVEL_CHOICE_STEP 72
@@ -41,6 +47,7 @@ typedef struct {
     char*         flow;                  /* 章节文本流（PSRAM，launch 分配） */
     size_t        flow_len;
     int           flow_start_pc;         /* 本章节流攒集起点（存档恢复锚） */
+    int           px;                   /* 2026-10-28：正文字号（launch 时取书阅读设置，本会话内恒定） */
     gnovel_phase_t phase;
     bool          choice_pending;         /* 本暂停点是否停在选项 */
     bool          fb_ok;                  /* book_layout 构建成功（否则兜底排版） */
@@ -159,15 +166,38 @@ static void run_to_pause(gnovel_state_t* s) {
     layout_reset();                          /* 每章重排前复位（含 restart 路径） */
     flow_reset(s);
     s->choice_pending = false;
+    sk_event_t ev = SK_EV_NONE;
+    int steps = 0;
     for (;;) {
-        sk_event_t ev = sk_step(s->sk, &s->cur);
+        ev = sk_step(s->sk, &s->cur);
+        if (ev == SK_EV_NONE) {              /* 2026-10-28 根因修复（串口实锤 pc=0/n=0B/ev=0）：
+                                              * sk_step 对 #//注释与无暂停副作用命令（title/bg/
+                                              * label/goto/set 等）返回 NONE——这些行被内核消化
+                                              * 并推进 pc，必须继续跑而不是当暂停点。原实现
+                                              * “非 TEXT 一律 break”在第一行注释就退出攒流，
+                                              * 0 句直达完页/空白页（restart 也死循环）。 */
+            if (++steps > s->sk->lines * 4) break;   /* goto 成环保险 */
+            continue;
+        }
         if (ev == SK_EV_TEXT) { flow_append(s, s->cur.name, s->cur.text); continue; }
         if (ev == SK_EV_CHOICE) s->choice_pending = true;
         break;                              /* CHOICE / END / EOF 均为本章暂停点 */
     }
+    if (s->flow_len == 0) {                  /* 空章兜底：不 build 空白阅读页 */
+        printf("GN: ch pc=%d n=0B ev=%d pend=%d -> %s\n",
+               s->flow_start_pc, (int)ev, s->choice_pending,
+               s->choice_pending ? "choices" : "finale");
+        s->phase = s->choice_pending ? NS_CHOICES : NS_FINALE;
+        s->page = 0;
+        return;
+    }
     book_layout_free();
-    bool ok = book_layout_build(s->flow, s->flow_len, novel_rect(), GNOVEL_PX);
+    bool ok = book_layout_build(s->flow, s->flow_len, novel_rect(), s->px);
     s->fb_ok = ok && book_layout_page_count() > 0;
+    printf("GN: ch pc=%d n=%dB ev=%d pend=%d pages=%d fb=%d%s\n",
+           s->flow_start_pc, (int)s->flow_len, (int)ev, s->choice_pending,
+           s->fb_ok ? (int)book_layout_page_count() : 1, s->fb_ok,
+           s->fb_ok ? "" : " FALLBACK");
     if (!s->fb_ok) printf("GN: layout fallback (%d B chapter)\n", (int)s->flow_len);
     s->phase = NS_READ;
     s->page = 0;
@@ -201,6 +231,18 @@ static bool restore(gnovel_state_t* s) {
         return false;
     }
     run_to_pause(s);                        /* sk->pc 已是章节起点：重放攒流 */
+    /* 2026-10-28 贴结局残档自愈：重放后无选项直达 END/EOF 且攒流近空
+     * （<128B，约 3 句），说明存档点是旧固件留下的通关残档——与其把玩家
+     * 摔进“完”页/空白页，不如从头重开并覆盖存档。攒流丰薄的终章不在此列，
+     * 用户仍可从存档点把结局看完。 */
+    if (!s->choice_pending && s->sk->pc >= s->sk->lines && s->flow_len < 128) {
+        printf("GN: stale near-end save (pc=%d, %d B) -> restart\n",
+               s->sk->pc, (int)s->flow_len);
+        sk_restart(s->sk);
+        run_to_pause(s);
+        save(s);
+        return true;
+    }
     size_t count = novel_pages(s);
     if (count) s->page = (size_t)page < count ? (size_t)page : count - 1;
     if (page < 0) s->page = 0;
@@ -215,9 +257,28 @@ static void paint(gc_ctx_t* g, uint8_t* fb) {
 
     if (s->phase == NS_FINALE) {
         ui_clear_page(fb);
-        ui_text_vc(fb, 342, 480, 72, "完", EPD_DRAW_ALIGN_CENTER, false);
-        if (s->cur.text[0])
-            ui_text_vc(fb, 342, 600, 26, s->cur.text, EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 342, 400, 72, "完", EPD_DRAW_ALIGN_CENTER, false);
+        /* 2026-10-28（用户真机反馈：结局文案显示不全）：结局文案最长 75 字，
+         * 原 26px 单行只容 26 字必出屏。按 23 汉字/行折行最多 4 行居中绘。 */
+        if (s->cur.text[0]) {
+            char ls[4][128];
+            int n = 0, i = 0, len = (int)strlen(s->cur.text);
+            while (i < len && n < 4) {
+                int units = 0, j = i, end = i;
+                while (j < len) {
+                    unsigned char c = (unsigned char)s->cur.text[j];
+                    int clen = (c & 0x80) ? (((c & 0xf0) == 0xe0) ? 3 : 2) : 1;
+                    int cw = (c >= 0x80) ? 2 : 1;
+                    if (units + cw > 46) break;          /* 23 汉字/行（26px×23≈598<屏宽） */
+                    units += cw; j += clen; end = j;
+                }
+                int m = end - i; if (m > 127) m = 127;
+                memcpy(ls[n], s->cur.text + i, m); ls[n][m] = 0;
+                ++n; i = end;
+            }
+            for (int k = 0; k < n; ++k)
+                ui_text_vc(fb, 342, 470 + k * 44, 26, ls[k], EPD_DRAW_ALIGN_CENTER, false);
+        }
         ui_text_vc(fb, 342, 660, 22, s->sk->title, EPD_DRAW_ALIGN_CENTER, false);
         ui_text_vc(fb, 342, 1118, 18, "点按屏幕重新开始 · 中长按退出", EPD_DRAW_ALIGN_CENTER, false);
         return;
@@ -235,7 +296,7 @@ static void paint(gc_ctx_t* g, uint8_t* fb) {
     ui_clear_page(fb);
     size_t count = novel_pages(s);
     if (s->fb_ok) {
-        book_layout_draw_page(fb, s->page, novel_rect(), GNOVEL_PX);
+        book_layout_draw_page(fb, s->page, novel_rect(), s->px);
     } else {
         int n = 0;
         fb_paginate(s->flow, s->flow_len, s->page, s_fb_lines, &n);
@@ -275,6 +336,7 @@ static gc_ev_t input(gc_ctx_t* g, const ui_gesture_event_t* ev) {
     if (ev->type != UI_GESTURE_TAP) return GC_EV_NONE;
 
     if (s->phase == NS_FINALE) {            /* 结局 → 重开 */
+        printf("GN: finale tap -> restart\n");
         sk_restart(s->sk);
         run_to_pause(s);
         save(s);
@@ -326,6 +388,12 @@ static bool launch(gc_ctx_t* g, const char* title_arg) {
     snprintf(path, sizeof(path), "%s/story.txt", g->pkg_dir);
     if (!sk_load(s->sk, path)) { quit(g); return false; }   /* 失败自清防泄漏 */
     snprintf(s->save_path, sizeof(s->save_path), "%s/.gnsave", g->pkg_dir);
+
+    /* 2026-10-28（用户拍板最简实现）：互动小说字号复用书阅读设置——
+     * 在书阅读的工具栏里调字号（36..72，默认 48），互动小说 launch 时取同一值，
+     * 零新增设置页/键位。本会话内恒定，重进游戏生效新值。 */
+    s->px = app_settings_book_px();
+    if (s->px < 24 || s->px > 96) s->px = GNOVEL_PX_FALLBACK;
 
     run_to_pause(s);
     if (!s->sk->title[0]) snprintf(s->sk->title, sizeof(s->sk->title), "%s", g->pkg_name);

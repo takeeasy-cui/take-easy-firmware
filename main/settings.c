@@ -43,6 +43,9 @@
 #define NVS_KEY_AVATAR "dev_avatar"
 #define NVS_KEY_STATUS_SIGNATURE "status_sig"
 #define NVS_KEY_CLOCK_ALM "clk_alm"
+/* 2026-10-28 时钟锁屏选项页：方向与自定义签名（签名在设置页编辑，锁屏只显示）。 */
+#define NVS_KEY_LOCK_LAND "lock_land"   /* 时钟锁屏方向 0=竖屏 1=横屏（默认横屏原版式） */
+#define NVS_KEY_LOCK_SIG  "lock_sig"    /* 时钟锁屏自定义签名（显示在时间下面） */
 /* 第二十一批 c 段（2026-10-20）：闹钟（PMU 硬件闹钟）/番茄时长/木鱼功德。 */
 #define NVS_KEY_ALARM_ON    "alm_on"
 #define NVS_KEY_ALARM_HOUR  "alm_h"
@@ -136,7 +139,9 @@ static uint8_t s_reader_turn_effect;
 static uint8_t s_book_line = 130, s_book_para = 50, s_book_margin = 24;
 static bool s_reader_power_turn;
 static bool s_reader_immersive = true;  /* 2026-10-17：默认全屏沉浸（参照 rc95：新开书即无状态栏） */
-static bool s_clock_almanac = true;     /* 2026-10-17：时钟锁屏下方农历/老黄历显示开关 */
+    static bool s_clock_almanac = true;     /* 2026-10-17：时钟锁屏下方农历/老黄历显示开关 */
+    static bool s_lock_clock_landscape = true;  /* 2026-10-28：时钟锁屏横竖屏（默认横屏=v1.8 版式） */
+    static char s_lock_clock_signature[64];     /* 2026-10-28：锁屏自定义签名（时间下方） */
 static bool s_alarm_enabled;           /* 闹钟开关（PMU RTC 硬件闹钟，主机负责每日重排） */
 static uint8_t s_alarm_hour, s_alarm_minute;
 static uint8_t s_pomo_work = 25;        /* 番茄专注时长（15..60，步进 5） */
@@ -286,7 +291,7 @@ void app_settings_init(void) {
     s_home_component = nvs_get_u8(h, NVS_KEY_HOME_COMPONENT, &raw) == ESP_OK && raw < APP_HOME_COMPONENT_COUNT
         ? (raw == 3 ? APP_HOME_CLOCK : (app_home_component_t)raw) : APP_HOME_FOLDER;
     raw = 60;
-    s_home_goal_minutes = nvs_get_u8(h, NVS_KEY_HOME_GOAL, &raw) == ESP_OK && raw >= 30 && raw <= 180 && raw % 30 == 0 ? raw : 60;
+    s_home_goal_minutes = nvs_get_u8(h, NVS_KEY_HOME_GOAL, &raw) == ESP_OK && raw >= 15 && raw <= 180 && raw % 15 == 0 ? raw : 60;
     raw = 0;
     s_main_refresh = nvs_get_u8(h, NVS_KEY_MAIN_REFRESH, &raw) == ESP_OK && raw <= APP_MAIN_REFRESH_WATER
         ? (app_main_refresh_mode_t)raw : APP_MAIN_REFRESH_NORMAL;
@@ -308,6 +313,14 @@ void app_settings_init(void) {
         s_status_signature[0] = 0;
     uint8_t clock_alm = 1;
     if (nvs_get_u8(h, NVS_KEY_CLOCK_ALM, &clock_alm) == ESP_OK) s_clock_almanac = clock_alm == 1;
+    {
+        uint8_t lock_land = 1;
+        if (nvs_get_u8(h, NVS_KEY_LOCK_LAND, &lock_land) == ESP_OK)
+            s_lock_clock_landscape = lock_land == 1;
+        size_t sig_len = sizeof(s_lock_clock_signature);
+        if (nvs_get_str(h, NVS_KEY_LOCK_SIG, s_lock_clock_signature, &sig_len) != ESP_OK)
+            s_lock_clock_signature[0] = 0;
+    }
     {   /* 闹钟/番茄/木鱼（第二十一批 c 段）：越界田退回默认。 */
         uint8_t raw = 0;
         if (nvs_get_u8(h, NVS_KEY_ALARM_ON, &raw) == ESP_OK) s_alarm_enabled = raw == 1;
@@ -544,7 +557,10 @@ esp_err_t app_settings_set_home_component(app_home_component_t component) {
     return err;
 }
 esp_err_t app_settings_set_home_goal_minutes(uint8_t minutes) {
-    if (minutes < 30 || minutes > 180 || minutes % 30) return ESP_ERR_INVALID_ARG;
+    /* 2026-10-28 修复（用户真机反馈）：首页阅读目标面板 ±15 分钟步进与旧校验（仅 30
+     * 的倍数）不一致——60±15 被 ESP_ERR_INVALID_ARG 全拒，表现为“±按钮点不动”。
+     * 统一为 15 分钟粒度（15..180），设置页 ±30 步进是其子集，两入口都兼容。 */
+    if (minutes < 15 || minutes > 180 || minutes % 15) return ESP_ERR_INVALID_ARG;
     esp_err_t err = home_preference_save(NVS_KEY_HOME_GOAL, minutes);
     if (err == ESP_OK) s_home_goal_minutes = minutes;
     return err;
@@ -968,6 +984,19 @@ void app_settings_set_clock_almanac(bool on) {
     if (s_clock_almanac == on) return;
     s_clock_almanac = on;
     nvs_put_u8(NVS_KEY_CLOCK_ALM, on ? 1 : 0);
+}
+bool app_settings_lock_clock_landscape(void) { return s_lock_clock_landscape; }
+void app_settings_set_lock_clock_landscape(bool land) {
+    if (s_lock_clock_landscape == land) return;
+    s_lock_clock_landscape = land;
+    nvs_put_u8(NVS_KEY_LOCK_LAND, land ? 1 : 0);
+}
+const char* app_settings_lock_clock_signature(void) { return s_lock_clock_signature; }
+void app_settings_set_lock_clock_signature(const char* sig) {
+    if (!sig) sig = "";
+    if (strnlen(sig, sizeof(s_lock_clock_signature)) >= sizeof(s_lock_clock_signature)) return;
+    if (nvs_put_str(NVS_KEY_LOCK_SIG, sig))
+        strlcpy(s_lock_clock_signature, sig, sizeof(s_lock_clock_signature));
 }
 /* ---- 闹钟/番茄/木鱼（第二十一批 c 段，用户 2026-10-20）---- */
 bool app_settings_alarm_enabled(void) { return s_alarm_enabled; }

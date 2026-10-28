@@ -20,7 +20,8 @@
 #define TTF_SIZE_SMALL 0
 #define TTF_SIZE_LARGE 1
 
-#define TTF_FONT_MAX 24
+/* 字体目录上限：24→128（上游 read-pico-reader rc101 同步；选择器已分页） */
+#define TTF_FONT_MAX 128
 #define TTF_FONT_NAME_MAX 64
 #define TTF_FONT_PATH_MAX 160
 

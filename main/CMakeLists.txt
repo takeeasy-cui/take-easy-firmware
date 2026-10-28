@@ -53,6 +53,7 @@ idf_component_register(
     SRCS
         "app_main.c"
         "boot_state.c"
+        "anti_fade.c"
         "apps/app_boot_recovery.c"
         "ota_update.c"
         "display.c"

@@ -49,6 +49,7 @@ typedef struct {
     int          pause_line;               /* 暂停行：存档/恢复重放当前句（不跳句） */
     bool         choosing;
     bool         ended;                    /* 结局终页 */
+    int64_t      last_step_ms;             /* 2026-10-28 推进节流：GL16 刷屏慢，防连点跳句 */
     char         save_path[192];
 } gtext_state_t;
 
@@ -309,6 +310,12 @@ static gc_ev_t input(gc_ctx_t* g, const ui_gesture_event_t* ev) {
         }
         return GC_EV_NONE;
     }
+    /* 2026-10-28 节流：GL16 全屏刷新约 1-2s，刷屏期间的连点会连跳多句（用户
+     * 实测反馈“取消打字机后对话连着走不停顿”）。推进句 500ms 内的重复输入
+     * 丢弃；选项选择/结局重开不受限（独立整页，不存在刷新延迟误触）。 */
+    int64_t now = g->app ? g->app->now_ms : 0;
+    if (now - s->last_step_ms < 500) return GC_EV_NONE;
+    s->last_step_ms = now;
     run_to_pause(s);                        /* 一击一句：整句上屏一次刷新 */
     save(s);
     return ev_area(g, (EpdRect){0, 0, 684, 1216});

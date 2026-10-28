@@ -39,6 +39,7 @@
 #include "read_pico_pmu_protocol.h"
 #include "settings.h"
 #include "sleep.h"
+#include "time_service.h"
 #include "ttf_font.h"
 #include "usb_storage.h"
 #include "app_font_context.h"
@@ -113,6 +114,7 @@ void app_main(void) {
     if (read_pico_init(&hw) != ESP_OK) return;
     rp_boot_mark("hw");
     if (hw.pmu_ready) restore_time_from_pmu();
+    app_clock_trim_start();   /* 2026-10-28：运行期 RC 周期重校准（离线走时治漂） */
     const bool vcom_ok = resolve_vcom_at_boot();
     rp_boot_mark("vcom");
     pmu_selftest_bind(hw.sensor);

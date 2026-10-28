@@ -9,14 +9,17 @@ idf_build_set_property(MINIMAL_BUILD ON)
 # 版本：V1.0 于 2026-10-21 正式发布（用户 2026-10-17 钦定固定至定稿）。
 # 定稿后升版：1.0.1 = 三 bug 修复 + SD 异步统计 + 目录标题；
 # 1.0.2 = 分界线残影对症（窄带周期全驱）+ WiFi 密码键盘下移贴底；
-# 1.0.3 = 阅读自动旋转 + 逆转裁判六项修复 + 锁屏提速 + EPUB 兼容 + 电量稳定。
+# 1.0.3 = 阅读自动旋转 + 逆转裁判六项修复 + 锁屏提速 + EPUB 兼容 + 电量稳定；
+# 1.0.4 = 习测题库应用 + 对话游戏/互动小说双引擎发布。
+# 1.0.5 = 真机反馈四修（阅读目标 15 分钟步进/翻页柔和灰边无锯齿/时钟锁屏选项页与竖屏排版/画皮四连修）
+#         + rc101 移植（ZIP64/字体目录 128）+ 防褪色重刷 + 运行期时钟校准 + 互动小说字号复用书阅读。
 # ota_update.c 的 TF 升级校验接受 "1.0" 前缀，1.0.x 全系互通。
 # 发布铁律（2026-10-25 教训）：站点 manifest.version 升版时必须同步本处
 # PROJECT_VER——刷机页会校验固件 esp_app_desc 内部版本，漏升即被拦截。
 if(DEFINED ENV{PICO_PROJECT_VER} AND NOT "$ENV{PICO_PROJECT_VER}" STREQUAL "")
     set(PROJECT_VER "$ENV{PICO_PROJECT_VER}")
 else()
-    set(PROJECT_VER "1.0.4")
+    set(PROJECT_VER "1.0.5")
 endif()
 project(Read_Pico)
 

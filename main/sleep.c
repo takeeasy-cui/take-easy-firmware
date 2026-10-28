@@ -205,7 +205,7 @@ static void lock_almanac_fields(int sy, int sm, int sd,
  * TTF 栅格化 mask 逐像素原位平铺（无需真旋转）。 */
 
 /* 横屏 TTF 文字：覆盖率 mask 与墨色混色，中心对齐（仿 fmj_screen_text，UTF-8 直入）。 */
-static void lock_land_text(uint8_t *fb, int cx, int cy, int px, const char *text, uint8_t ink) {
+static void lock_land_text(uint8_t *fb, int cx, int cy, int px, const char* text, uint8_t ink) {
     enum { MW = 660, MH = 76 };
     static EXT_RAM_BSS_ATTR uint8_t mask[MW * MH];
     memset(mask, 0, sizeof(mask));
@@ -231,6 +231,34 @@ static void lock_land_text(uint8_t *fb, int cx, int cy, int px, const char *text
         }
 }
 
+/* 竖屏 TTF 文字（2026-10-28 时钟锁屏竖屏版式）：与 lock_land_text 同一 mask 管线，
+ * 但直接写竖屏物理坐标（不做 90° 翻转）。 */
+static void lock_port_text(uint8_t *fb, int cx, int cy, int px, const char* text, uint8_t ink) {
+    enum { MW = 660, MH = 76 };
+    static EXT_RAM_BSS_ATTR uint8_t mask[MW * MH];
+    memset(mask, 0, sizeof(mask));
+    if (!ttf_text_mask_px(mask, MW, MH, 0, ttf_ascender_px(px), px, text)) return;
+    int minX = MW, maxX = -1, minY = MH, maxY = -1;
+    for (int y = 0; y < MH; ++y)
+        for (int x = 0; x < MW; ++x)
+            if (mask[y * MW + x]) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+    if (maxX < minX) return;
+    const int ox = cx - (maxX - minX + 1) / 2 - minX;
+    const int oy = cy - (maxY - minY + 1) / 2 - minY;
+    for (int y = minY; y <= maxY; ++y)
+        for (int x = minX; x <= maxX; ++x) {
+            uint8_t a = mask[y * MW + x];
+            if (!a) continue;
+            uint8_t v = (uint8_t)((ink * (uint32_t)a + 0xFFu * (255u - a) + 127) / 255);
+            epd_draw_pixel(ox + x, oy + y, v, fb);
+        }
+}
+
 /* v3（2026-10-19）：lock_land_hline 已无调用方（v1.8 时钟锁屏改版后遗留），
  * 本次 sleep.c 重编触发 -Werror 删除；如需横线分隔可由 ui_hairline 承担。 */
 
@@ -249,6 +277,8 @@ void app_lock_clock_art(uint8_t *fb) {
      * 底部历法头 20→24 保持次级层级。老黄历与待办整体下调 30px（470→500），
      * 离点阵时间（底约 431）更远。 */
     const bool extras = app_settings_clock_almanac();
+    /* 2026-10-28：自定义签名（设置页编辑，锁屏只显示；时间正下方）。 */
+    const char *sig = app_settings_lock_clock_signature();
     char date[56];
     if (ok) snprintf(date, sizeof(date), "%d年%d月%d日 星期%s",
                      tm_bj.tm_year + 1900, tm_bj.tm_mon + 1, tm_bj.tm_mday, wk[tm_bj.tm_wday]);
@@ -256,20 +286,56 @@ void app_lock_clock_art(uint8_t *fb) {
     /* v5（用户 2026-10-19 真机反馈）：日期 cx 570→608=屏幕几何中心。原 570 是
      * bbox 中心对齐下的经验偏移，但 lock_land_text 对齐的是文字墨迹包围盒中心
      * （星期几 1-3 字等长不齐），bbox 中心≠版面中心导致视觉偏左；统一用 608
-     * 与点阵时钟（(1216-w)/2 视觉居中）同基准。 */
-    if (extras) lock_land_text(fb, 608, 78, 36, date, 0x00);
+     * 与点阵时钟（(1216-w)/2 视觉居中）同基准。
+     * 2026-10-28 修复（用户真机反馈：竖屏出现两份日期两份电量）：横屏日期/电量
+     * 原画在横竖分支之前，竖屏分支再画一份 → 双份。移入横屏分支按方向各自绘制。 */
     int pct = pmu_battery_percent(read_pico_pmu_get());
     char bat[10];
     snprintf(bat, sizeof(bat), "%d%%", pct >= 0 ? pct : 0);
-    lock_land_text(fb, 1096, 70, 26, bat, 0x00);
     /* 21f：闹铃图标随闹钟下线移除。 */
     /* 中央特大点阵时钟：pitch 38 / r18，"10:17" 5 字符宽约 1102 居中，高约 266 */
     char cs[8] = "--:--";
     if (ok) snprintf(cs, sizeof(cs), "%02d:%02d", tm_bj.tm_hour, tm_bj.tm_min);
+    if (!app_settings_lock_clock_landscape()) {
+        /* ---- 竖屏版式 v2（2026-10-28 用户真机反馈）：日期上移与电量同行；点阵时钟
+         * 上移一段；签名加大到 44px（大于阴历头 40px）；宜/忌改左右并列（横屏同构，
+         * 双中心 170/514）并与阴历头一起下移。 */
+        if (extras) lock_port_text(fb, 342, 70, 36, date, 0x00);   /* 与电量同行 */
+        lock_port_text(fb, 600, 70, 26, bat, 0x00);
+        const int pitch_p = 22, dr_p = 10;
+        int wp = nothing_dot_text_w(cs, pitch_p);
+        nothing_dot_text(fb, (684 - wp) / 2, 310, cs, dr_p, pitch_p, 0x00);   /* 310..464 */
+        if (sig[0]) lock_port_text(fb, 342, 540, 44, sig, 0x00);   /* 比阴历头(40)大一档 */
+        if (extras && ok) {
+            char gz[32], lunar[48], yi[64], ji[64];
+            lock_almanac_fields(tm_bj.tm_year + 1900, tm_bj.tm_mon + 1, tm_bj.tm_mday,
+                                gz, sizeof(gz), lunar, sizeof(lunar), yi, sizeof(yi), ji, sizeof(ji));
+            /* 宜/忌左右并列（参考横屏双中心 300/908 → 竖屏按宽度比 170/514）。 */
+            int w_yi = ttf_text_width_px(34, yi);
+            int gx = 170 - (38 + 10 + w_yi) / 2;
+            epd_fill_circle(gx + 19, 730, 19, 0x00, fb);
+            lock_port_text(fb, gx + 19, 730, 23, "宜", 0xFF);
+            lock_port_text(fb, gx + 48 + w_yi / 2, 732, 34, yi, 0x00);
+            int w_ji = ttf_text_width_px(34, ji);
+            int hx = 514 - (38 + 10 + w_ji) / 2;
+            epd_draw_circle(hx + 19, 730, 19, 0x00, fb);
+            epd_draw_circle(hx + 19, 730, 18, 0x00, fb);
+            lock_port_text(fb, hx + 19, 730, 23, "忌", 0x00);
+            lock_port_text(fb, hx + 48 + w_ji / 2, 732, 34, ji, 0x00);
+            char head[112];
+            snprintf(head, sizeof(head), "%s · %s", gz, lunar);
+            lock_port_text(fb, 342, 900, 40, head, 0x00);
+        }
+        return;
+    }
     const int pitch = 38, dr = 18;
     int w = nothing_dot_text_w(cs, pitch);
     const int clock_top = 165;
+    /* 横屏专属（2026-10-28 修复双份后从公共段移入）：上日期居中/电量右上。 */
+    if (extras) lock_land_text(fb, 608, 78, 36, date, 0x00);
+    lock_land_text(fb, 1096, 70, 26, bat, 0x00);
     nothing_dot_text_rot(fb, (1216 - w) / 2, clock_top, cs, dr, pitch, 0x00);
+    if (sig[0]) lock_land_text(fb, 608, 472, 40, sig, 0x00);   /* 签名 v2 加大 30→40（≥阴历头）：时间（底 431）与黄历（顶约 504）之间 */
     /* 开关开启：时钟下方老黄历。v5（用户 2026-10-20）：右侧待办列移除，
      * 宜/忌改为左右两块居中——徽章样式与数据面板老黄历卡一致。
      * 注意：lock fb 为竖屏原始坐标，圆按 (683-视觉y, 视觉x) 映射；文字走 lock_land_text 自带翻转。 */
@@ -314,6 +380,14 @@ static void lock_clock_minute_paint(uint8_t *fb) {
     if (!lock_now_bj(&tm_bj)) return;
     char cs[8];
     snprintf(cs, sizeof(cs), "%02d:%02d", tm_bj.tm_hour, tm_bj.tm_min);
+    if (!app_settings_lock_clock_landscape()) {
+        /* 竖屏 v2（2026-10-28）：时间条 x 23..661 / y 310..464，上下各留 4px 擦除边。 */
+        const int pitch = 22, dr = 10;
+        int w = nothing_dot_text_w(cs, pitch);
+        ui_fill_rect_fast((EpdRect){23, 306, 638, 162}, 0xFF, fb);
+        nothing_dot_text(fb, (684 - w) / 2, 310, cs, dr, pitch, 0x00);
+        return;
+    }
     const int pitch = 38, dr = 18;
     int w = nothing_dot_text_w(cs, pitch);
     ui_fill_rect_fast((EpdRect){242, 37, 281, 1142}, 0xFF, fb);

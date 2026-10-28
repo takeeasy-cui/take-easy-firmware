@@ -36,6 +36,7 @@
  */
 
 #include "app_loop.h"
+#include "anti_fade.h"
 #include "auto_lock.h"
 /* 21f（2026-10-20）：闹钟链路下线，alarm.h 不再引用（底层保留）。 */
 #include "crash_note.h"
@@ -1005,6 +1006,14 @@ void app_loop_run(const app_loop_config_t* config) {
                 app_present(&ctx, current, APP_REDRAW_PAGE);
             }
             app_lock_resume_pending_run();   /* 解锁首帧已出：补办事前被延后的传输恢复 */
+        }
+        /* 2026-10-28 防褪色重刷（页屿 PageIsle 思路/上游 anti_fade 接线）：静置超过
+         * 间隔后整屏 GC16 重推当前帧，抵消强光下像素电荷泄漏导致的画面渐灰发暗。
+         * 锁屏/菜单/电源框/传输/USB 不刷（这些链路有自己的刷新节奏）。 */
+        if (!menu_open && !power_dialog_open && !s_quick.open && !touch.touched &&
+            !usb_storage_active() && !wifi_busy && current != &app_transfer &&
+            anti_fade_due(ctx.now_ms, last_input_ms, false)) {
+            guard_draw_result(ctx.hl, update_display_mode(ctx.hl, MODE_GC16));
         }
         if (menu_open && feedback.updates > 0
             && ctx.now_ms - feedback.last_ms >= UI_SETTLE_IDLE_MS) {

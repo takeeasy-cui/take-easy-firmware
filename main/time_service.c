@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: Apache-2.0
  * 中文：S3 RTC 离线走时；在线每小时校准，离线每六小时短连已保存 WiFi。
- * English: S3 RTC keeps offline time; calibrate hourly online or briefly every six hours offline.
+ * 2026-10-28 新增运行期 RC 慢时钟周期重校准（页屿 PageIsle 同思路）：设备无网/
+ * 未配 WiFi 时 NTP 校时永远够不着，内部 150kHz RC 漂移（实测约 2 分钟/天）
+ * 裸奔累积。现由后台任务每 10 分钟用 40MHz 主晶振（±10ppm）重测 RC 周期并
+ * 更新换算值——esp_clk_slowclk_cal_set 强制单调、不跳变（IDF esp_clk.c 实现保证）。
+ * English: S3 RTC keeps offline time; NTP hourly online or every six hours offline.
+ * 2026-10-28: periodic RC slow-clock recalibration using the 40 MHz main XTAL,
+ * so wall time stays accurate even when NTP is unreachable.
  */
 #include "time_service.h"
 #include <stdatomic.h>
@@ -11,6 +17,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
+#include "esp_private/esp_clk.h"
+#include "soc/rtc.h"
 #include "read_pico_transfer.h"
 #include "sleep.h"
 #include "weather_service.h"
@@ -20,10 +28,36 @@
 #define CLOCK_ONLINE_INTERVAL 3600ULL
 #define CLOCK_OFFLINE_INTERVAL (6ULL * 3600)
 #define CLOCK_RETRY_US (5LL * 60 * 1000000)
+#define CLOCK_TRIM_PERIOD_MS (10ULL * 60 * 1000)  /* 运行期 RC 重校准周期 */
+#define CLOCK_TRIM_CYCLES 8192                    /* ~60ms 测量时长，足够精确 */
 static atomic_bool s_running;
 static bool s_loaded;
 static uint64_t s_last_sync;
 static int64_t s_next_attempt_us = 15000000;
+
+/* 运行期 RC 慢时钟重校准：用 40MHz 主晶振重测 RC 实际频率，更新 tick→微秒
+ * 换算值。清醒状态的走时误差从 RC 裸漂（实测 ~2 分钟/天）降到主晶振量级
+ * （±10ppm，每天 <2 秒）。浅睡段的睡前校准由 IDF esp_sleep 自带；深睡走 PMU RTC。
+ * 与 NTP 校时互补：NTP 纠绝对值，本任务纠走时速率。 */
+static void clock_trim_task(void* arg) {
+    (void)arg;
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(CLOCK_TRIM_PERIOD_MS));
+        uint32_t cal = rtc_clk_cal(CLK_CAL_RTC_SLOW, CLOCK_TRIM_CYCLES);
+        if (cal) {
+            esp_clk_slowclk_cal_set(cal);
+            ESP_LOGD("clock", "rc slow clock recalibrated: %u", cal);
+        }
+    }
+}
+
+void app_clock_trim_start(void) {
+    static bool started;
+    if (started) return;
+    started = true;
+    if (xTaskCreate(clock_trim_task, "clk_trim", 2560, NULL, 1, NULL) != pdPASS)
+        ESP_LOGW("clock", "clock trim task not started");
+}
 
 static void clock_worker(void *arg) {
     (void)arg;

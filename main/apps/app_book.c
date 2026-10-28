@@ -4852,7 +4852,11 @@ static app_redraw_t turn_page(app_ctx_t* ctx, int dir) {
      * present 的 AREA 分支直接走 update_display_area_with(…, MODE_DU, …)，翻页耗时显著下降。
      * 残影治理沿用既有机制：reader_full_pages 自动全刷（s_reader_cleanup→GC16 整屏）、
      * 图片页（image_gray_refresh）仍走 GL16/GC16、水波纹路径不变、开书/章节切换保持 GL16。 */
-    app_redraw_t redraw = paint_reading(ctx, MODE_DU);
+    /* v3 改动回退（2026-10-28 用户实测：翻页字体锯齿→换 FOLLOW 灰度保真→残影严重）。
+     * 最终方案：翻页/重排一律 GL16 + textturn 柔和灰边 diff（37 相完整驱动无残影、
+     * 灰度保真无锯齿、diff 只推变化像素）——V1.0.2 时代的原路径，10-19 为提速改
+     * 阈值 DU 后引入锯齿。速度靠 diff（空白区不驱动）而非裁剪驱动。 */
+    app_redraw_t redraw = paint_reading(ctx, MODE_GL16);
     s_reader_turn_pending = !chrome_changed && redraw == APP_REDRAW_AREA && from_text_frame &&
         book_layout_page_image_count(s_page) == 0 && !app_settings_book_background_path()[0];
     s_water_turn_pending = !chrome_changed && redraw == APP_REDRAW_AREA && !s_reader_cleanup &&
@@ -4893,7 +4897,7 @@ static app_redraw_t resize_text(app_ctx_t* ctx, int dir) {
     unlock_draw();
     app_settings_set_book_px(s_px);
     save_progress();
-    return paint_reading(ctx, MODE_DU);
+    return paint_reading(ctx, MODE_DU);   /* 字号/行距重排：与 baseline/上游一致保持 DU，锯齿感知弱且快 */
 }
 
 static app_redraw_t apply_reader_layout(app_ctx_t* ctx, int next_px, int next_margin,
@@ -5712,7 +5716,7 @@ static app_redraw_t adjust_spacing(app_ctx_t* ctx, int control) {
     app_settings_set_book_line_spacing(line);
     app_settings_set_book_paragraph_spacing(para);
     save_progress();
-    return paint_reading(ctx, MODE_DU);
+    return paint_reading(ctx, MODE_DU);   /* 字号/行距重排：与 baseline/上游一致保持 DU，锯齿感知弱且快 */
 }
 static app_redraw_t select_reading_font(app_ctx_t* ctx, int style) {
     static const char* filenames[] = {

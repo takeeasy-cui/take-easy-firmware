@@ -67,6 +67,12 @@ void app_settings_set_todo(int index, const char *text);
 /// 时钟锁屏的农历/老黄历显示开关。/ Toggle for the almanac rows under the clock lock.
 bool app_settings_clock_almanac(void);
 void app_settings_set_clock_almanac(bool on);
+/* ---- 时钟锁屏选项页（2026-10-28 用户需求）：锁屏点击弹出，两选项即时切换 ----
+ * 签名不在锁屏编辑：设置页改好即生效，锁屏只负责显示（时间下方）。 */
+bool app_settings_lock_clock_landscape(void);          /// true=横屏（默认原版式）/ landscape
+void app_settings_set_lock_clock_landscape(bool land);
+const char* app_settings_lock_clock_signature(void);    /// 锁屏签名 / lock-screen signature
+void app_settings_set_lock_clock_signature(const char* sig);
 /* ---- 闹钟（PMU 硬件闹钟，用户 2026-10-20 第二十一批 c 段）----
  * 闹钟独立于锁屏模式：PMU RTC 到点推 ALARM_FIRED，主机关机则自动开机
  * （wake_reason=6）。每日循环由主机响铃时重排实现（PMU 只设单次）。
