@@ -118,9 +118,11 @@ idf_component_register(
         "apps/app_transfer.c"
         "apps/usb_storage.c"
         # GameCore 统一游戏内核（2026-10-18）：主引擎在 game/，插件在 apps/plugins/。
-        # Story Engine v1（2026-10-26 M2）：双出口共用 story_kernel 解释器——
-        #   text-*=对话游戏（gtext，对话框流）/ novel-*=互动小说（gnovel，book_layout 分页）。
-        #   推理 avgr / 步步高 gbbk 移出构建封存（M6/M5 回归；tag pre-story-purge）。
+        # Story Engine v1（2026-10-26 M2）：text-/novel- 双出口共用 story_kernel 解释器；
+        #   2026-10-30 化双为「文绎」单入口（gstory 合体插件）：列表 text-/novel- 同出，
+        #   按包路由 gtext（对话框流）/gnovel（book_layout 分页），中短键弹存读档菜单。
+        # BBK 伏魔记（2026-10-28 M5 回归）：FMJ 引擎逻辑层复自实验稿 + 原版点阵 6x +
+        #   shadow 差分输出（bbk_present）；资源 /sdcard/games/bbk-*/ 目录直挂。
         "game/game_core.c"
         "game/game_pkg.c"
         "game/game_host_ui.c"
@@ -128,10 +130,22 @@ idf_component_register(
         "game/quiz_engine.c"
         "apps/plugins/gtext.c"
         "apps/plugins/gnovel.c"
+        "apps/plugins/gstory.c"
         "apps/plugins/gquiz.c"
-        "apps/app_gtext.c"
-        "apps/app_gnovel.c"
+        "apps/plugins/gbbk.c"
+        "apps/plugins/bbk/bbk_present.c"
+        "apps/plugins/bbk/fmj_canvas.c"
+        "apps/plugins/bbk/fmj_combat.c"
+        "apps/plugins/bbk/fmj_datlib.c"
+        "apps/plugins/bbk/fmj_font.c"
+        "apps/plugins/bbk/fmj_game.c"
+        "apps/plugins/bbk/fmj_res.c"
+        "apps/plugins/bbk/fmj_scene.c"
+        "apps/plugins/bbk/fmj_screen.c"
+        "apps/plugins/bbk/fmj_script.c"
+        "apps/app_gstory.c"
         "apps/app_quiz.c"
+        "apps/app_gbbk.c"
         "book/book_store.c"
         "book/book_progress.c"
         "book/book_history_backup.c"
@@ -158,7 +172,7 @@ idf_component_register(
         "factory/pmu_selftest.c"
         "factory/vcom_setup.c"
     REQUIRES ${main_requires}
-    INCLUDE_DIRS "." "app" "apps" "font" "ui" "factory" "book" "game" "apps/plugins" "ime"
+    INCLUDE_DIRS "." "app" "apps" "font" "ui" "factory" "book" "game" "apps/plugins" "apps/plugins/bbk" "ime"
     EMBED_FILES
         "assets/lock_4bpp.bin.z"
         "assets/loading_4bpp.bin.z"

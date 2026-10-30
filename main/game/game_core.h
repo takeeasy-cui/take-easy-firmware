@@ -41,6 +41,8 @@ typedef enum {
     GC_CAT_AVGR = 0,   /* 推理 AVG（逆转裁判等；宿主引擎 avg_engine）【M6 回归位，M2 起移出入口】 */
     GC_CAT_TEXT,       /* 对话游戏（story_kernel + 对话框流渲染，text- 前缀） */
     GC_CAT_NOVEL,      /* 互动小说（story_kernel + book_layout 分页渲染，novel- 前缀） */
+    GC_CAT_STORY,      /* 文绎合体入口（2026-10-30 用户）：text-+novel- 同列表，
+                         挂载后按包子类型路由 gtext/gnovel 子插件 */
     GC_CAT_BBK,        /* 步步高电子词典游戏（伏魔记）【M5，暂移出入口】 */
     GC_CAT_QUIZ,       /* 习测（应知应会题库，quiz- 前缀；quiz_engine） */
 } gc_cat_t;
@@ -86,6 +88,8 @@ struct gc_plugin_s {
     const char* name;        /* 应用入口显示名（应用页 tile 标签） */
     gc_cat_t    cat;         /* 该插件服务的分类（决定扫包前缀与入口） */
     bool        landscape;   /* true=横屏插件：画布 1216×684，内核包旋转窗口与坐标互换 */
+    bool        middle_menu; /* true=中短键下发给插件（文绎弹存读档菜单）；
+                                * false 维持内核默认：中短键=整屏强刷 */
 
     /* 进插件页时创建游戏会话。pkg_dir 已挂载（""=无包，插件画引导页）。
      * title_arg：入口直传参数（NULL=默认）。返回 false=会话失败（state 置 NULL）。 */
@@ -135,8 +139,13 @@ void         gc_app_media_lost(app_ctx_t* ctx);
 
 /* ===================== 资源包 API ===================== */
 
-/// 列出分类包名（zip 去扩展名；目录原名）。返回包数。
-int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots);
+/// 列出分类包名（zip 去扩展名；目录原名）。kinds/kind_slots 可空：逐包写入
+/// 子类型（GC_CAT_STORY 列表的 游戏/小说 徽标用）。返回包数。
+int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots,
+                gc_cat_t* kinds, int kind_slots);
+
+/// 当前挂载包的子类型（文绎：GC_CAT_TEXT/GC_CAT_NOVEL；mount 时记录）。
+gc_cat_t gc_pkg_mounted_kind(void);
 
 /// 挂载分类内第 index 个包：返回资源根目录（zip→缓存目录；目录→游戏目录）；
 /// 失败 NULL。内核 launch 已自动调用（index 0），一般无需再碰。
@@ -173,8 +182,9 @@ void gc_ui_nopkg(uint8_t* fb, const char* game_name, gc_cat_t cat);
 /// 资源包缺失引导页（横屏插件：内核在旋转窗口内直绘）。
 void gc_ui_nopkg_land(uint8_t* fb, const char* game_name, gc_cat_t cat);
 /// 入口包列表页（恒竖屏 684×1216：竖持点选；进游戏后才切旋转）。
+/// kinds 可空（仅 GC_CAT_STORY 传）：逐项子类型，驱动 游戏/小说 徽标。
 void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
-                    int count, gc_cat_t cat);
+                    int count, gc_cat_t cat, const gc_cat_t* kinds);
 /// 列表页命中测试（竖屏坐标；返回行号，-1=未命中）。
 int gc_ui_pkg_list_hit(int x, int y, int count);
 

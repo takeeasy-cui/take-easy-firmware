@@ -1,20 +1,21 @@
 /*
- * app_gtext.c —【文字游戏】入口薄壳：GameCore + text 通用文字游戏插件。
+ * app_gstory.c —【文绎】入口薄壳：GameCore + story 合体插件
+ * （text- 对话游戏 + novel- 互动小说，2026-10-30 取代双 tile）。
  */
 #include "app.h"
 #include "game_core.h"
 #include "ui_gesture.h"
 
-#include "plugins/gtext.h"
+#include "plugins/gstory.h"
 
-static void on_enter(app_ctx_t* ctx) { gc_app_enter(&gc_plugin_gtext, NULL, ctx); }
+static void on_enter(app_ctx_t* ctx) { gc_app_enter(&gc_plugin_gstory, NULL, ctx); }
 
-const app_desc_t app_gtext = {
-    .title = "文字游戏",
-    .detail = "互动小说 · 分支剧情",
+const app_desc_t app_gstory = {
+    .title = "文绎",
+    .detail = "对话游戏 · 互动小说",
     .enter_full = true,
     .owns_keys = true,
-    .defer_middle_short = true,
+    .defer_middle_short = true,   /* 中短=弹菜单（插件处理）/中长=退出 */
     .render = gc_app_render,
     .on_gesture = gc_app_gesture,
     .on_key = gc_app_key,

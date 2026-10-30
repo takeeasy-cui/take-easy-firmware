@@ -99,11 +99,14 @@ esp_err_t pico_ota_inspect(const char *path, pico_ota_info_t *info) {
         return ESP_ERR_INVALID_RESPONSE;
     }
     /* v2（用户 2026-10-20）：只接受 Take Easy 1.0 系列升级包——旧版（0.3.3-rcXX 等）
-     * 分区布局不同（无输入法码表分区、otadata 偏移不同），误刷会导致码表/存储错位。 */
+     * 分区布局不同（无输入法码表分区、otadata 偏移不同），误刷会导致码表/存储错位。
+     * v3（2026-10-30 · 2.0 定稿）：闸门放开为 "1.0"/"2.0" 双系列——
+     * 2.0 设备可用 TF 包直升 2.x 后续版或回退 1.0.x；
+     * 1.0 系老设备升 2.0 请走网页刷机（旧固件闸门只认 1.0 前缀，会提示不适用）。 */
     char cand_ver[33] = {0};
     memcpy(cand_ver, candidate.version, 32);
-    if (strncmp(cand_ver, "1.0", 3) != 0) {
-        set_message(info->message, sizeof(info->message), "升级包不是 Take Easy 1.0 系列，不适用");
+    if (strncmp(cand_ver, "1.0", 3) != 0 && strncmp(cand_ver, "2.0", 3) != 0) {
+        set_message(info->message, sizeof(info->message), "升级包不是 Take Easy 1.0/2.0 系列，不适用");
         return ESP_ERR_INVALID_RESPONSE;
     }
     if (!copy_field(info->candidate_version, sizeof(info->candidate_version), candidate.version,
@@ -111,8 +114,7 @@ esp_err_t pico_ota_inspect(const char *path, pico_ota_info_t *info) {
         set_message(info->message, sizeof(info->message), "升级包版本信息无效");
         return ESP_ERR_INVALID_RESPONSE;
     }
-    /* 版本号固定为 1.0，升级场景就是同版本覆盖安装，不再比较版本。 */
-    /* The version is pinned to 1.0, so upgrades are same-version reinstalls; skip the comparison. */
+    /* 升级语义为覆盖安装，不做版本大小比较，闸门只查系列前缀。 */
 
     info->image_size = (size_t)file_stat.st_size;
     info->ready = true;

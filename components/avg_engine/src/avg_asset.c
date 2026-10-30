@@ -66,7 +66,15 @@ const uint8_t* avg_assets_get(avg_assets_t* a, const char* path,
     if (!buf) return NULL;
     uint8_t* dmask = NULL;
     unsigned ow = 0, oh = 0;
-    if (!s_decode(path, max_w, max_h, buf, &dmask, &ow, &oh) || !ow || !oh) {
+    /* 2026-10-28：偶发解码失败重试一次（真机实测"背景时有时无"：SD 读抖动/
+     * LRU 逐出与刷屏并发时一次性失败会被渲染端画占位框，重试即消除）。
+     * decode 失败时 buf 半途数据不置信，重试前零填。 */
+    bool ok = s_decode(path, max_w, max_h, buf, &dmask, &ow, &oh);
+    if (!ok && (dmask == NULL)) {
+        memset(buf, 0, (size_t)max_w * max_h);
+        ok = s_decode(path, max_w, max_h, buf, &dmask, &ow, &oh);
+    }
+    if (!ok || !ow || !oh) {
         heap_caps_free(buf);
         if (dmask) heap_caps_free(dmask);
         return NULL;

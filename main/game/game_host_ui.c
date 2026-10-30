@@ -59,6 +59,8 @@ void gc_ui_title_page(uint8_t* fb, const char* game, const char* sub, bool has_c
         ui_draw_round_rect(fb, (EpdRect){222, 704, 240, 64}, 14, GC_INK);
         ui_text_vc(fb, 342, 736, 24, "继续游戏", EPD_DRAW_ALIGN_CENTER, false);
     }
+    /* 2026-10-30 文绎：中短键改弹存读档/退出菜单，让玩家第一眼看到这个新交互。 */
+    ui_text_vc(fb, 342, 1130, 16, "中键：存读档菜单 · 长按退出", EPD_DRAW_ALIGN_CENTER, false);
 }
 
 void gc_ui_typewrap(const char* text, int shown, int max_lines, int width_units,
@@ -151,14 +153,21 @@ void gc_ui_missing(uint8_t* fb, const char* file, int x, int y, unsigned w, unsi
 void gc_ui_nopkg(uint8_t* fb, const char* game_name, gc_cat_t cat) {
     ui_clear_page(fb);
     ui_text_vc(fb, 342, 420, 34, game_name, EPD_DRAW_ALIGN_CENTER, false);
-    ui_text_vc(fb, 342, 520, 22, "未找到游戏资源包", EPD_DRAW_ALIGN_CENTER, false);
-    char help[160];
-    snprintf(help, sizeof(help), "TF 卡 games/" "%s-xxx%s", gc_cat_prefix(cat),
-             cat == GC_CAT_BBK ? "" : ".zip");
-    ui_text_vc(fb, 342, 586, 18, help, EPD_DRAW_ALIGN_CENTER, false);
-    if (cat == GC_CAT_BBK)
-        ui_text_vc(fb, 342, 626, 18, "大资源放 games/bbk-xxx/ 文件夹（目录直挂）",
+    ui_text_vc(fb, 342, 520, 22, "未找到故事资源包", EPD_DRAW_ALIGN_CENTER, false);
+    if (cat == GC_CAT_STORY) {          /* 文绎：两类包都提示（2026-10-30） */
+        ui_text_vc(fb, 342, 586, 18, "TF 卡 games/text-xxx.zip（对话游戏）",
                    EPD_DRAW_ALIGN_CENTER, false);
+        ui_text_vc(fb, 342, 626, 18, "或 games/novel-xxx.zip（互动小说）",
+                   EPD_DRAW_ALIGN_CENTER, false);
+    } else {
+        char help[160];
+        snprintf(help, sizeof(help), "TF 卡 games/" "%s-xxx%s", gc_cat_prefix(cat),
+                 cat == GC_CAT_BBK ? "" : ".zip");
+        ui_text_vc(fb, 342, 586, 18, help, EPD_DRAW_ALIGN_CENTER, false);
+        if (cat == GC_CAT_BBK)
+            ui_text_vc(fb, 342, 626, 18, "大资源放 games/bbk-xxx/ 文件夹（目录直挂）",
+                       EPD_DRAW_ALIGN_CENTER, false);
+    }
     ui_text_vc(fb, 342, 1120, 15, "长按中键退出", EPD_DRAW_ALIGN_CENTER, false);
 }
 
@@ -185,9 +194,18 @@ static const char* list_label(const char* name, gc_cat_t cat) {
     return name;
 }
 
+/* 文绎合体列表：按逐包子类型去对应前缀（列表名字仍显示包名/标题）。 */
+static const char* list_label_st(const char* name, gc_cat_t kind) {
+    const char* p = kind == GC_CAT_NOVEL ? "novel" : "text";
+    size_t n = strlen(p);
+    if (!strncmp(name, p, n) && name[n] == '-') return name + n + 1;
+    return name;
+}
+
 void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
-                    int count, gc_cat_t cat) {
-    /* 恒竖屏 684×1216（用户 2026-10-18）：竖持点选，进游戏后才切横屏。 */
+                    int count, gc_cat_t cat, const gc_cat_t* kinds) {
+    /* 恒竖屏 684×1216（用户 2026-10-18）：竖持点选，进游戏后才切横屏。
+     * 2026-10-30 文绎：kinds 逐包子类型 → 行尾「游戏/小说」发丝胶囊徽标。 */
     ui_clear_page(fb);
     const int W = 684, CX = 342;
     int shown = count < 0 ? 0 : count;
@@ -197,9 +215,10 @@ void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
     ui_text(fb, 40, 64, 26, title, EPD_DRAW_ALIGN_LEFT, false);
     char total[96];
     if (shown > 0)
-        snprintf(total, sizeof(total), "%d 个游戏 · 点选进入", count);
+        snprintf(total, sizeof(total), "%d 个%s · 点选进入", count,
+                 cat == GC_CAT_STORY ? "故事" : "游戏");
     else
-        snprintf(total, sizeof(total), "未找到游戏资源包");
+        snprintf(total, sizeof(total), "未找到故事资源包");
     ui_text(fb, W - 40, 64, 18, total, EPD_DRAW_ALIGN_RIGHT, false);
     /* 列表卡（白底圆角 + 2px 纯黑框，同设置页 settings_card）。 */
     EpdRect card = list_card_rect();
@@ -208,8 +227,11 @@ void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
     ui_draw_control_frame(fb, card, 22, 0x00);
     if (shown <= 0) {
         char help[160];
-        snprintf(help, sizeof(help), "TF 卡 games/%s-xxx%s", gc_cat_prefix(cat),
-                 cat == GC_CAT_BBK ? "" : ".zip");
+        if (cat == GC_CAT_STORY)
+            snprintf(help, sizeof(help), "TF 卡 games/text-xxx.zip 或 novel-xxx.zip");
+        else
+            snprintf(help, sizeof(help), "TF 卡 games/%s-xxx%s", gc_cat_prefix(cat),
+                     cat == GC_CAT_BBK ? "" : ".zip");
         ui_text(fb, 64, card.y + 56, 21, help, EPD_DRAW_ALIGN_LEFT, false);
         if (cat == GC_CAT_BBK)
             ui_text(fb, 64, card.y + 96, 18, "大资源放 games/bbk-xxx/ 文件夹（目录直挂）",
@@ -224,9 +246,22 @@ void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
             ui_text_vc(fb, 84, cy, 22, no, EPD_DRAW_ALIGN_CENTER, false);
             char label[48];
             const char* raw = list_label(names[i], cat);
+            bool st = (cat == GC_CAT_STORY && kinds);
+            if (st) raw = list_label_st(names[i], kinds[i]);
             snprintf(label, sizeof(label), "%s", raw);
             int name_x = 116;
-            int max_px = (W - 40) - (name_x + 24) - 64;
+            int right = W - 108;                     /* 默认右界：chevron 左留白 */
+            if (st) {
+                /* 徽标胶囊：游戏/小说，行名右侧（chevron 左方）。 */
+                EpdRect pill = {W - 182, cy - 18, 72, 36};
+                ui_fill_round_rect(fb, pill, 18, 0xff);
+                ui_draw_round_rect(fb, pill, 18, GC_HAIR);
+                ui_text_vc(fb, pill.x + pill.width / 2, cy, 17,
+                           kinds[i] == GC_CAT_NOVEL ? "小说" : "游戏",
+                           EPD_DRAW_ALIGN_CENTER, false);
+                right = pill.x - 16;
+            }
+            int max_px = right - name_x - 16;
             while (label[0] && ui_text_width_px(24, label) > max_px) {
                 size_t n = strlen(label) - 1;
                 while (n && ((unsigned char)label[n] & 0xc0) == 0x80) --n;
@@ -241,7 +276,12 @@ void gc_ui_pkg_list(uint8_t* fb, const char* title, const char* const* names,
         snprintf(more, sizeof(more), "还有 %d 个未显示", count - rows);
         ui_text(fb, 40, card.y + card.height + 26, 17, more, EPD_DRAW_ALIGN_LEFT, false);
     }
-    ui_text(fb, CX, 1168, 15, "右键返回 · 长按中键退出", EPD_DRAW_ALIGN_CENTER, false);
+    if (cat == GC_CAT_STORY)
+        ui_text(fb, CX, 1168, 15, "中键弹菜单 · 右键返回 · 长按退出",
+                EPD_DRAW_ALIGN_CENTER, false);
+    else
+        ui_text(fb, CX, 1168, 15, "右键返回 · 长按中键退出",
+                EPD_DRAW_ALIGN_CENTER, false);
 }
 
 int gc_ui_pkg_list_hit(int x, int y, int count) {

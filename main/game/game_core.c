@@ -78,6 +78,7 @@ const char* gc_cat_prefix(gc_cat_t cat) {
     case GC_CAT_AVGR: return "avgr";
     case GC_CAT_TEXT: return "text";
     case GC_CAT_NOVEL: return "novel";
+    case GC_CAT_STORY: return "story";
     case GC_CAT_BBK:  return "bbk";
     case GC_CAT_QUIZ: return "quiz";
     default:          return "";
@@ -88,7 +89,11 @@ const gc_plugin_t* gc_active(void) { return s_active ? s_ctx.plugin : NULL; }
 
 /* ---------------- 列表状态机（v2，用户 2026-10-18） ----------------
  * 三入口先进入分类列表页（扫到的全部包），点选后才进入游戏；
- * 横屏插件（avgr）的列表与游戏画面都是横屏 1216×684。 */
+ * 横屏插件（avgr）的列表与游戏画面都是横屏 1216×684。
+ * 2026-10-30 文绎：story 合体列表（text-+novel-）逐包子类型存 s_kinds，
+ * 列表页行尾徽标区分 游戏/小说。 */
+
+static gc_cat_t s_kinds[8];                /* 列表页逐包子类型（同包槽位数） */
 
 /* 进入插件分类页 → 扫包 → 停在列表（不选包）。 */
 void gc_open_list(const gc_plugin_t* p, app_ctx_t* app) {
@@ -98,7 +103,7 @@ void gc_open_list(const gc_plugin_t* p, app_ctx_t* app) {
     s_ctx.app = app;
     s_ctx.plugin = p;
     s_ctx.pkg_count = gc_pkg_scan(p->cat, (char*)s_ctx.pkg_list,
-                                  sizeof(s_ctx.pkg_list[0]), 8);
+                                  sizeof(s_ctx.pkg_list[0]), 8, s_kinds, 8);
     s_ctx.listing = true;
     s_active = true;
     ESP_LOGI(TAG, "list %s packages=%d", p->id, s_ctx.pkg_count);
@@ -134,7 +139,7 @@ bool gc_launch(const gc_plugin_t* p, const char* title_arg, app_ctx_t* app) {
     s_ctx.plugin = p;
     (void)title_arg;
     s_ctx.pkg_count = gc_pkg_scan(p->cat, (char*)s_ctx.pkg_list,
-                                  sizeof(s_ctx.pkg_list[0]), 8);
+                                  sizeof(s_ctx.pkg_list[0]), 8, NULL, 0);
     if (s_ctx.pkg_count > 0) {
         /* 与 gc_pick_package 同一启动链（含失败回收）。 */
         s_ctx.listing = true;
@@ -195,7 +200,8 @@ void gc_app_render(app_ctx_t* ctx, uint8_t* fb) {
         if (n < 0) n = 0;
         for (int i = 0; i < n; ++i) names[i] = s_ctx.pkg_list[i];
         gc_ui_pkg_list(fb, s_ctx.plugin->name, names, s_ctx.pkg_count,
-                       s_ctx.plugin->cat);
+                       s_ctx.plugin->cat,
+                       s_ctx.plugin->cat == GC_CAT_STORY ? s_kinds : NULL);
         return;
     }
     paint_plugin(s_ctx.plugin, fb);
@@ -215,7 +221,13 @@ app_redraw_t gc_app_gesture(app_ctx_t* ctx, const ui_gesture_event_t* ev) {
     if (!s_ctx.state || !s_ctx.plugin->input) return APP_REDRAW_NONE;
     ui_gesture_event_t local = *ev;
     if (s_ctx.plugin->landscape) local = to_landscape_ev(ev);
-    return gc_commit(ctx, s_ctx.plugin->input(&s_ctx, &local));
+    gc_ev_t gev = s_ctx.plugin->input(&s_ctx, &local);
+    /* 2026-10-30 修复（真机）：触摸路径此前对 GC_EV_QUIT 直接 commit，而 resolve
+     * 里 QUIT→APP_REDRAW_NONE 不置 request_return——插件由触摸发起的退出请求
+     * 全部被吞。与 key 路径一致，QUIT 显式回应用页。文绎菜单退出现已改走
+     * gc_open_list 回包列表，不返回 QUIT；此语义留给其余插件的触摸退出。 */
+    if (gev == GC_EV_QUIT) { ctx->request_return = true; return APP_REDRAW_NONE; }
+    return gc_commit(ctx, gev);
 }
 
 app_redraw_t gc_app_key(app_ctx_t* ctx, int key) {
@@ -224,7 +236,14 @@ app_redraw_t gc_app_key(app_ctx_t* ctx, int key) {
      * 退出整个游戏（误触丢进度）；仅列表页/插件不处理右键时维持退出。
      * 其余键发给插件。 */
     s_ctx.want_du = false;
-    if (key == UI_KEY_2) return APP_REDRAW_FULL;
+    if (key == UI_KEY_2) {
+        /* 文绎（middle_menu 插件，2026-10-30 用户）：中短键下发插件弹存读/退出
+         * 菜单（强刷已入菜单项）；其余插件维持中短=整屏强刷。 */
+        if (s_active && !s_ctx.listing && s_ctx.state && s_ctx.plugin &&
+            s_ctx.plugin->middle_menu && s_ctx.plugin->key)
+            return gc_commit(ctx, s_ctx.plugin->key(&s_ctx, key));
+        return APP_REDRAW_FULL;
+    }
     if (key == UI_KEY_3) {
         if (s_ctx.listing || !s_active) { ctx->request_return = true; return APP_REDRAW_NONE; }
         if (!s_ctx.state || !s_ctx.plugin->key) { ctx->request_return = true; return APP_REDRAW_NONE; }

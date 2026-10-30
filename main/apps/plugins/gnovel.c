@@ -411,6 +411,20 @@ static void quit(gc_ctx_t* g) {
     g->state = NULL;
 }
 
+/* ===================== 文绎合体入口（gstory）菜单桥接 ===================== */
+bool gnovel_save(gc_ctx_t* g) {
+    gnovel_state_t* s = (gnovel_state_t*)g->state;
+    if (!s || !s->sk) return false;
+    save(s);
+    return true;
+}
+
+bool gnovel_restore(gc_ctx_t* g) {
+    gnovel_state_t* s = (gnovel_state_t*)g->state;
+    if (!s || !s->sk) return false;
+    return restore(s);
+}
+
 const gc_plugin_t gc_plugin_gnovel = {
     .id = "novel",
     .name = "互动小说",

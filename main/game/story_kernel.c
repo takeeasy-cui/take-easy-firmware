@@ -106,6 +106,45 @@ static bool cmp_op(int l, const char* op, int r) {
     return false;
 }
 
+/* ===================== 复合条件（cchoice/iftext/ifc 共用，2026-10-30 檐下谣） =====================
+ * 条件串：原子 ‘+’ 连接（全部满足才过）。原子形如
+ *   f:名            标志已置
+ *   !f:名           标志未置
+ *   v:名OP值         整数变量比较（OP ∈ ==,!=,>=,<=,>,<）
+ * 空条件串由调用方处理；原子不认识 → 判不过（保守）。 */
+static bool eval_cond(const sk_state_t* sk, const char* cond) {
+    char work[192];
+    if (strlen(cond) >= sizeof(work)) return false;
+    strcpy(work, cond);
+    char* save = NULL;
+    bool any = false;
+    for (char* at = strtok_r(work, "+", &save); at; at = strtok_r(NULL, "+", &save)) {
+        any = true;
+        while (*at == ' ') ++at;
+        if (at[0] == '!' && at[1] == 'f' && at[2] == ':') {
+            if (sk_flag_has(sk, at + 3)) return false;
+        } else if (at[0] == 'f' && at[1] == ':') {
+            if (!sk_flag_has(sk, at + 2)) return false;
+        } else if (at[0] == 'v' && at[1] == ':') {
+            const char* p = at + 2, * q = p;
+            while (*q && *q != '=' && *q != '!' && *q != '>' && *q != '<') ++q;
+            if (!*q || q == p) return false;
+            size_t nn = (size_t)(q - p);
+            char name[SK_NAME_MAX];
+            if (nn >= SK_NAME_MAX) return false;
+            memcpy(name, p, nn); name[nn] = 0;
+            int oplen = 1;
+            if ((q[0] == '=' && q[1] == '=') || q[0] == '!' ||
+                ((q[0] == '>' || q[0] == '<') && q[1] == '=')) oplen = 2;
+            char op[3] = {q[0], (char)(oplen == 2 ? q[1] : 0), 0};
+            if (!cmp_op(sk_var_get(sk, name), op, atoi(q + oplen))) return false;
+        } else {
+            return false;
+        }
+    }
+    return any;
+}
+
 /* ===================== 加载 / 释放 ===================== */
 
 bool sk_load(sk_state_t* sk, const char* path) {
@@ -167,10 +206,15 @@ void sk_free(sk_state_t* sk) {
     sk->bg[0] = 0;
     sk->bg_dirty = false;
     sk->char_dirty = false;
+    sk->st_count = 0;
+    sk->status[0] = 0;
+    sk->status_dirty = false;
     sk->last_name[0] = 0;
 }
 
 /* ===================== set / 条件跳 ===================== */
+
+static void rebuild_status(sk_state_t* sk);   /* 前向：exec_set 联动国势栏 */
 
 static void exec_set(sk_state_t* sk, char* arg) {
     char* eq = strchr(arg, '=');
@@ -198,6 +242,7 @@ static void exec_set(sk_state_t* sk, char* arg) {
         }
     } else v = 0;
     sk_var_set(sk, name, (int16_t)v);
+    rebuild_status(sk);                       /* 国势栏随变量联动（未声明=no-op） */
 }
 
 static void exec_ifgoto(sk_state_t* sk, char* arg, bool invert) {
@@ -217,9 +262,50 @@ static void exec_if_flag(sk_state_t* sk, char* arg, bool invert) {
 
 /* ===================== 选项 ===================== */
 
+/* 国势栏重展开（* status 声明后，任何 * set 都会刷 status[]；未声明无开销）。 */
+static void rebuild_status(sk_state_t* sk) {
+    if (sk->st_count <= 0) return;
+    size_t n = 0;
+    for (int i = 0; i < sk->st_count; ++i) {
+        if (i && n + 1 < sizeof(sk->status)) sk->status[n++] = ' ';
+        n += (size_t)snprintf(sk->status + n, sizeof(sk->status) - n, "%s%d",
+                              sk->st_label[i], sk_var_get(sk, sk->st_var[i]));
+        if (n >= sizeof(sk->status) - 1) { n = sizeof(sk->status) - 1; break; }
+    }
+    sk->status[n] = 0;
+    sk->status_dirty = true;
+}
+
+static void exec_status(sk_state_t* sk, char* arg) {
+    sk->st_count = 0;
+    while (*arg && sk->st_count < 6) {
+        while (*arg == ' ') ++arg;              /* 跳空白 */
+        if (!*arg) break;
+        char* tok = arg;
+        char* sp = strchr(arg, ' ');
+        size_t len = sp ? (size_t)(sp - arg) : strlen(arg);
+        if (sp) arg = sp + 1; else arg += len;
+        /* tok：标签=变量 */
+        char* eq = memchr(tok, '=', len);
+        if (eq && eq - tok > 0 && eq - tok < (long)sizeof(sk->st_label[0])) {
+            copy_trim(sk->st_label[sk->st_count], sizeof(sk->st_label[0]),
+                      tok, (size_t)(eq - tok));
+            size_t vn = len - (size_t)(eq - tok) - 1;
+            if (vn > 0 && vn < SK_NAME_MAX)
+                copy_trim(sk->st_var[sk->st_count], SK_NAME_MAX, eq + 1, vn),
+                ++sk->st_count;
+        }
+    }
+    rebuild_status(sk);
+}
+
 static void parse_choice(sk_state_t* sk, char* arg, sk_out_t* out) {
     sk->choice_direct = strstr(arg, "->") != NULL;
     sk->choice_target[0][0] = 0;
+    for (int i = 0; i < SK_MAX_CHOICES; ++i) {   /* 锁定态清零（老 choice 无锁） */
+        sk->choice_locked[i] = false;
+        sk->choice_hint[i][0] = 0;
+    }
     out->choice_count = 0;
     char* tok = arg;
     while (*tok && out->choice_count < SK_MAX_CHOICES) {
@@ -252,8 +338,85 @@ static void parse_choice(sk_state_t* sk, char* arg, sk_out_t* out) {
     if (out->choice_count == 0) out->choice_count = 1, strcpy(out->choice_text[0], "继续");
 }
 
+/* cchoice（条件选项，2026-10-30 檐下谣）：项 = [条件]文案->标签 或 [g:条件]文案->标签@提示。
+ *   无 [ ]：恒显；
+ *   [f:…/v:…/!f:…+]：条件不过 → 隐藏；
+ *   [g:条件]：条件不过 → 灰显锁定项（保留位置，禁止选中，点提示出提示语）；
+ *             条件过 → 正常可选项。条件过时 @后缀的提示语被忽略。 */
+static void parse_cchoice(sk_state_t* sk, char* arg, sk_out_t* out) {
+    sk->choice_direct = true;
+    out->choice_count = 0;
+    for (int i = 0; i < SK_MAX_CHOICES; ++i) {
+        sk->choice_locked[i] = false;
+        sk->choice_hint[i][0] = 0;
+        sk->choice_target[i][0] = 0;
+    }
+    char* tok = arg;
+    while (*tok && out->choice_count < SK_MAX_CHOICES) {
+        char* bar = strchr(tok, '|');
+        size_t n = bar ? (size_t)(bar - tok) : strlen(tok);
+        if (n) {
+            char seg[384];
+            size_t take = n < sizeof(seg) - 1 ? n : sizeof(seg) - 1;
+            memcpy(seg, tok, take); seg[take] = 0;
+            while (*seg == ' ') memmove(seg, seg + 1, strlen(seg));   /* 去前导空格 */
+            bool lock_mode = false;
+            char cond[192] = {0};
+            char* body = seg;
+            if (seg[0] == '[') {
+                char* close = strchr(seg, ']');
+                if (close) {
+                    *close = 0;
+                    const char* c = seg + 1;
+                    if (c[0] == 'g' && c[1] == ':') { lock_mode = true; c += 2; }
+                    copy_trim(cond, sizeof(cond), c, strlen(c));
+                    body = close + 1;
+                    while (*body == ' ') ++body;
+                }
+            }
+            bool pass = cond[0] ? eval_cond(sk, cond) : true;
+            bool show_ok = pass;                     /* 正常可选项 */
+            bool show_lock = !pass && lock_mode;     /* 灰显锁定项 */
+            if (show_ok || show_lock) {
+                char* arrow = strstr(body, "->");
+                if (arrow) {
+                    const char* hint = NULL;
+                    *arrow = 0;
+                    char* tail = arrow + 2;
+                    if (show_lock) {
+                        const char* at = strchr(tail, '@');
+                        if (at) hint = at + 1;
+                    } else {
+                        char* at = strchr(tail, '@');
+                        if (at) *at = 0;             /* 已解锁：提示语忽略 */
+                    }
+                    copy_trim(sk->choice_target[out->choice_count], SK_NAME_MAX,
+                              tail, strlen(tail));
+                    if (show_lock) sk->choice_locked[out->choice_count] = true;
+                    if (hint) {
+                        while (*hint == ' ') ++hint;
+                        copy_trim(sk->choice_hint[out->choice_count],
+                                  sizeof(sk->choice_hint[0]), hint, strlen(hint));
+                    } else if (show_lock) {
+                        strcpy(sk->choice_hint[out->choice_count], "条件未满足");
+                    }
+                    copy_trim(out->choice_text[out->choice_count],
+                              sizeof(out->choice_text[0]), body, strlen(body));
+                    ++out->choice_count;
+                } else {
+                    printf("SK: cchoice seg missing '->': '%s'\n", body);
+                }
+            }                                         /* 不满足且非锁：隐藏 */
+        }
+        if (!bar) break;
+        tok = bar + 1;
+    }
+    if (out->choice_count == 0) { out->choice_count = 1; strcpy(out->choice_text[0], "继续"); }
+}
+
 void sk_choose(sk_state_t* sk, int index) {
     if (index < 0 || index >= SK_MAX_CHOICES) return;
+    if (sk->choice_locked[index]) return;     /* cchoice 锁定项：不响应（防漏侧） */
     if (sk->choice_direct) {
         if (sk->choice_target[index][0]) goto_label(sk, sk->choice_target[index]);
     } else {
@@ -261,6 +424,14 @@ void sk_choose(sk_state_t* sk, int index) {
         snprintf(mark, sizeof(mark), "c%d", index);
         sk_flag_set(sk, mark);               /* 顺序继续（choice 行已消费） */
     }
+}
+
+bool sk_choice_is_locked(const sk_state_t* sk, int index) {
+    return index >= 0 && index < SK_MAX_CHOICES && sk->choice_locked[index];
+}
+
+const char* sk_choice_hint(const sk_state_t* sk, int index) {
+    return (index >= 0 && index < SK_MAX_CHOICES) ? sk->choice_hint[index] : "";
 }
 
 void sk_restart(sk_state_t* sk) {
@@ -272,6 +443,9 @@ void sk_restart(sk_state_t* sk) {
     sk->bg_dirty = true;
     sk->chars[0][0] = sk->chars[1][0] = sk->chars[2][0] = 0;
     sk->char_dirty = true;
+    sk->st_count = 0;
+    sk->status[0] = 0;
+    sk->status_dirty = false;
 }
 
 /* ===================== 步进 ===================== */
@@ -368,11 +542,40 @@ sk_event_t sk_step(sk_state_t* sk, sk_out_t* out) {
     if (match(l, "* ifgoto", &arg)) { exec_ifgoto(sk, arg, false); return SK_EV_NONE; }
     if (match(l, "* ifngoto", &arg)) { exec_ifgoto(sk, arg, true); return SK_EV_NONE; }
     if (match(l, "* ifnot", &arg)) { exec_if_flag(sk, arg, true); return SK_EV_NONE; }
+    if (match(l, "* iftext", &arg)) {           /* 条件插句：不过整行跳过 */
+        char* sp = strchr(arg, ' ');
+        if (sp) {
+            char cond[192];
+            copy_trim(cond, sizeof(cond), arg, (size_t)(sp - arg));
+            if (cond[0] && eval_cond(sk, cond)) {
+                const char* t = sp + 1;
+                while (*t == ' ') ++t;
+                out->type = SK_EV_TEXT;
+                copy_trim(out->name, sizeof(out->name), sk->last_name, strlen(sk->last_name));
+                copy_trim(out->text, SK_TEXT_MAX, t, strlen(t));
+                return SK_EV_TEXT;
+            }
+        }
+        return SK_EV_NONE;
+    }
+    if (match(l, "* ifc", &arg)) {              /* 复合条件跳（原子同 cchoice） */
+        char cond[192] = {0}, target[SK_NAME_MAX] = {0};
+        if (sscanf(arg, "%191s %23s", cond, target) == 2 && eval_cond(sk, cond))
+            goto_label(sk, target);
+        return SK_EV_NONE;
+    }
     if (match(l, "* if", &arg)) { exec_if_flag(sk, arg, false); return SK_EV_NONE; }
     if (match(l, "* set", &arg)) { exec_set(sk, arg); return SK_EV_NONE; }
+    if (match(l, "* status", &arg)) { exec_status(sk, arg); return SK_EV_NONE; }
     if (match(l, "* choice", &arg)) {
         out->name[0] = 0;                    /* 选项页不带名牌（防残留上一句说话人） */
         parse_choice(sk, arg, out);
+        out->type = SK_EV_CHOICE;
+        return SK_EV_CHOICE;
+    }
+    if (match(l, "* cchoice", &arg)) {       /* 条件选项（檐下谣） */
+        out->name[0] = 0;
+        parse_cchoice(sk, arg, out);
         out->type = SK_EV_CHOICE;
         return SK_EV_CHOICE;
     }
@@ -408,6 +611,20 @@ size_t sk_save(const sk_state_t* sk, int extra_page, char* buf, size_t cap) {
         n += (size_t)snprintf(buf + n, cap - n, " %s=%d", sk->vnames[i], sk->vvals[i]);
     for (int i = 0; i < sk->fcount && n + 2 < cap; ++i)
         n += (size_t)snprintf(buf + n, cap - n, " %s", sk->fnames[i]);
+    /* 副作用持久化（2026-10-28）：重进存档即恢复场景，不再白屏。资源名单 token
+     * 无空白，与旧格式兼容（旧存档无这些 token=保持旧行为）。 */
+    if (sk->bg[0] && n + 100 < cap)
+        n += (size_t)snprintf(buf + n, cap - n, " BG=%s", sk->bg);
+    for (int i = 0; i < 3; ++i)
+        if (sk->chars[i][0] && n + 110 < cap)
+            n += (size_t)snprintf(buf + n, cap - n, " C%d=%s:%d", i, sk->chars[i],
+                                  (int)sk->char_pos[i]);
+    if (sk->st_count > 0 && n + 144 < cap) {
+        n += (size_t)snprintf(buf + n, cap - n, " ST=");
+        for (int i = 0; i < sk->st_count && n + 24 < cap; ++i)
+            n += (size_t)snprintf(buf + n, cap - n, "%s%s:%s", i ? "," : "",
+                                  sk->st_label[i], sk->st_var[i]);
+    }
     return n;
 }
 
@@ -418,11 +635,44 @@ bool sk_restore(sk_state_t* sk, const char* line, int* extra_page) {
     const char* p = line;
     if (sscanf(p, "%d", &pc) != 1 || pc < 0) return false;
     sk->pc = pc;
+    bool bg_touched = false, char_touched = false, st_touched = false;
     while (*p && *p == ' ') ++p;
     while (*p && *p != ' ') ++p;            /* 跳过 pc token */
     while (sscanf(p, "%95s", tok) == 1) {
         if (tok[0] == 'P' && (tok[1] >= '0' && tok[1] <= '9')) {
             if (extra_page) *extra_page = atoi(tok + 1);
+        } else if (!strncmp(tok, "BG=", 3)) {          /* 背景副作用 */
+            copy_trim(sk->bg, sizeof(sk->bg), tok + 3, strlen(tok + 3));
+            bg_touched = true;
+        } else if (!strncmp(tok, "C", 1) && tok[1] >= '0' && tok[1] <= '2' && tok[2] == '=') {
+            int slot = tok[1] - '0';                   /* 立绘槽：C0=名:位 */
+            char* colon = strchr(tok + 3, ':');
+            if (colon) {
+                *colon = 0;
+                copy_trim(sk->chars[slot], sizeof(sk->chars[slot]),
+                          tok + 3, strlen(tok + 3));
+                sk->char_pos[slot] = (uint8_t)(atoi(colon + 1) & 3);
+                char_touched = true;
+            }
+        } else if (!strncmp(tok, "ST=", 3)) {          /* 国势栏声明 */
+            sk->st_count = 0;
+            char* seg = tok + 3;
+            while (*seg && sk->st_count < 6) {
+                char* comma = strchr(seg, ',');
+                size_t len = comma ? (size_t)(comma - seg) : strlen(seg);
+                char* colon = memchr(seg, ':', len);
+                if (colon && colon - seg > 0 && colon - seg < (long)sizeof(sk->st_label[0])) {
+                    copy_trim(sk->st_label[sk->st_count], sizeof(sk->st_label[0]),
+                              seg, (size_t)(colon - seg));
+                    size_t vn = len - (size_t)(colon - seg) - 1;
+                    if (vn > 0 && vn < SK_NAME_MAX)
+                        copy_trim(sk->st_var[sk->st_count], SK_NAME_MAX, colon + 1, vn),
+                        ++sk->st_count;
+                }
+                if (!comma) break;
+                seg = comma + 1;
+            }
+            st_touched = true;
         } else if (strchr(tok, '=')) {
             char* eq = strchr(tok, '=');
             *eq = 0;
@@ -434,5 +684,8 @@ bool sk_restore(sk_state_t* sk, const char* line, int* extra_page) {
         if (!p) break;
         while (*p == ' ') ++p;
     }
+    if (bg_touched) sk->bg_dirty = true;
+    if (char_touched) sk->char_dirty = true;
+    if (st_touched) rebuild_status(sk);      /* 变量已回填：展开即当前值 */
     return true;
 }

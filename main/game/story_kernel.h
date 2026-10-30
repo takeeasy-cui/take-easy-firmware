@@ -11,6 +11,9 @@
  *   * bg 名|none                     背景（渲染器解析路径；none=清除）
  *   * char 槽(0-2) 名|none L|C|R [聚焦0|1]   立绘上屏/清槽
  *   * clear                          清立绘不清背景
+ *   * status 标签=变量 [标签=变量 …≤6]  国势栏声明（如 * status 银=gold 粮=grain）；
+ *                                   内核把当前变量值展开进 status[]，渲染器画顶部
+ *                                   状态带；变量每次 * set 后自动重展开并置 dirty
  *   > 正文                          段落/旁白（继承最近名牌）
  *   * name 名                        粘性名牌（后续 > 的说话人；say 也更新它）
  *   * say 名 正文                    带名牌对话
@@ -24,6 +27,13 @@
  *   * set 名                          无 '=' 视为布尔标志置位（gtext 旧语法）
  *   * choice 文案->标签|文案->标签…  直跳式选项（2..6 项；选后跳目标 label）
  *   * choice a|b|c…                  旧式标志选项（选后置 flag c0..c5 顺序继续）
+ *   * cchoice 项|项…                 条件选项（2026-10-30 檐下谣）：项带 [条件]
+ *                                   前缀，条件不过则隐藏；[g:条件]文案->标签@提示
+ *                                   为灰显锁定项（不隐藏，点了出提示）；无前缀恒显。
+ *                                   条件原子 f:名 / !f:名 / v:名OP值（OP ∈ ==,!=,
+ *                                   >=,<=,>,<），‘+’ 连接全部满足。
+ *   * iftext 条件 正文               条件插句：条件不过整行跳过（二周目彩蛋等）
+ *   * ifc 条件 标签                  复合条件跳（原子同上，过则跳）
  *   * ending 文案                    结局登记 + 终页
  *   * end                            无名结局
  *
@@ -42,8 +52,8 @@ extern "C" {
 
 #define SK_MAX_VARS    64
 #define SK_MAX_FLAGS   64
-#define SK_MAX_LABELS  512
-#define SK_MAX_CHOICES 6
+#define SK_MAX_LABELS  768   /* 2026-10-30 明末五线版：一线 ~140，五线富余 */
+#define SK_MAX_CHOICES 8     /* 2026-10-30 檐下谣：地图 7 项/推理台 7 项（推理台按钮至 y1208 入屏） */
 #define SK_TEXT_MAX    640
 #define SK_NAME_MAX    24
 #define SK_SCRIPT_MAX  (2 * 1024 * 1024)   /* story.txt 整读上限 */
@@ -98,9 +108,19 @@ typedef struct {
     uint8_t char_pos[3];                   /* 0=L 1=C 2=R */
     bool  char_focus[3];
 
-    /* 选项上下文（CHOICE 暂停时有效） */
+    /* * status 国势栏（2026-10-28 明末风云）：标签=变量 对（≤6），
+     * 值随 * set 自动重展开；渲染器读 status[] 画顶部状态带。 */
+    char  st_label[6][10];
+    char  st_var[6][SK_NAME_MAX];
+    int   st_count;
+    char  status[128];                     /* 展开结果："银9200 粮3200 …" */
+    bool  status_dirty;
+
+    /* 选项上下文（CHOICE 暂停时有效；cchoice 同表） */
     bool choice_direct;                    /* true=直跳式 */
     char choice_target[SK_MAX_CHOICES][SK_NAME_MAX];
+    bool choice_locked[SK_MAX_CHOICES];    /* cchoice g:锁定项（灰显，不响应选择） */
+    char choice_hint[SK_MAX_CHOICES][96];  /* 锁定项点击提示（渲染器读） */
 
     char last_name[48];                    /* 粘性名牌 */
 } sk_state_t;
@@ -120,8 +140,12 @@ void sk_restart(sk_state_t* sk);
 sk_event_t sk_step(sk_state_t* sk, sk_out_t* out);
 
 /// 选择第 index 项（0 基）：直跳式跳目标 label；旧式置 flag c{index} 顺序继续。
-/// 须在 SK_EV_CHOICE 暂停时调用；越界忽略。
+/// 须在 SK_EV_CHOICE 暂停时调用；越界忽略。cchoice 锁定项不跳。
 void sk_choose(sk_state_t* sk, int index);
+
+/// cchoice 锁定项判定与提示（檐下谣：置灰禁选、点击弹提示）。
+bool        sk_choice_is_locked(const sk_state_t* sk, int index);
+const char* sk_choice_hint(const sk_state_t* sk, int index);
 
 /* ===================== 变量 / 标志 / label ===================== */
 
@@ -132,9 +156,11 @@ void sk_flag_set(sk_state_t* sk, const char* name);
 int  sk_find_label(const sk_state_t* sk, const char* name);     /* -1=无 */
 
 /* ===================== 存档序列化（单行文本，向后兼容 gtext 旧 .gtsave） =====================
- * 格式："<pc> [P<页码>] [名=值 …] [标志名 …]"
+ * 格式："<pc> [P<页码>] [名=值 …] [标志名 …] [BG=名] [C0=名:位]… [ST=标签:变量,…]"
  * 旧 gtext 存档 "pc f1 f2"（裸词）自动按标志解析。extra_page 由 NovelFront
- * 使用（-1=不存页码）；restore 回读后由调用方决定如何使用。 */
+ * 使用（-1=不存页码）；restore 回读后由调用方决定如何使用。
+ * 2026-10-28：BG/C/ST 副作用持久化——重进存档即恢复背景立绘国势栏，
+ * 不再"场景中部存档重进=白屏无背景"。 */
 size_t sk_save(const sk_state_t* sk, int extra_page, char* buf, size_t cap);
 bool   sk_restore(sk_state_t* sk, const char* line, int* extra_page);
 

@@ -13,13 +13,21 @@ idf_build_set_property(MINIMAL_BUILD ON)
 # 1.0.4 = 习测题库应用 + 对话游戏/互动小说双引擎发布。
 # 1.0.5 = 真机反馈四修（阅读目标 15 分钟步进/翻页柔和灰边无锯齿/时钟锁屏选项页与竖屏排版/画皮四连修）
 #         + rc101 移植（ZIP64/字体目录 128）+ 防褪色重刷 + 运行期时钟校准 + 互动小说字号复用书阅读。
-# ota_update.c 的 TF 升级校验接受 "1.0" 前缀，1.0.x 全系互通。
+# 2.0 = 大版本定稿（2026-10-30 用户拍板）：步步高游戏（伏魔记原生移植：全屏 6x 点阵、
+#         相机跟随、圆形触控键、存读档）+ 文绎合体入口（text-/novel- 双列表与徽标、
+#         中键菜单存/读/退/刷、退出自动存档回列表）+ 剧情引擎条件扩展（cchoice/iftext/ifc、
+#         选择项 8、跨周目记）+ 触摸退出内核修复 + 三款剧本（檐下谣/明末扩/17 岁素材修复）。
+# 2.0.1 = 资源导入统一（2026-10-30 用户）：pkg_display_name 的 game.txt 显示名扩展到
+#         zip 形态——伏魔记 bbk-fmj.zip 原样拷入 games/ 即显示「伏魔记」并直接可玩，
+#         与故事包零解压体验完全一致（目录直挂形态保持兼容）。
+# ota_update.c 的 TF 升级校验自 v2.0 起接受 "1.0"/"2.0" 双前缀：2.0 设备可 TF 直升或
+# 回退；1.0 系老设备升 2.0 走网页刷机（旧固件闸门只认 1.0，TF 直升会被拒）。
 # 发布铁律（2026-10-25 教训）：站点 manifest.version 升版时必须同步本处
 # PROJECT_VER——刷机页会校验固件 esp_app_desc 内部版本，漏升即被拦截。
 if(DEFINED ENV{PICO_PROJECT_VER} AND NOT "$ENV{PICO_PROJECT_VER}" STREQUAL "")
     set(PROJECT_VER "$ENV{PICO_PROJECT_VER}")
 else()
-    set(PROJECT_VER "1.0.5")
+    set(PROJECT_VER "2.0.1")
 endif()
 project(Read_Pico)
 

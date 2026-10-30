@@ -33,14 +33,15 @@
 
 static char s_mounted_name[96];
 static char s_mounted_dir[GC_PATH_MAX];
+static gc_cat_t s_mounted_kind = GC_CAT_TEXT;   /* 文绎：挂载包的子类型 */
 
 static void ensure_dirs(void) {
     (void)mkdir(GAMES_ROOT, 0775);
     (void)mkdir(GCACHE_ROOT, 0775);
 }
 
-/* 一个分类包条目：包名（zip 去扩展名）+ 形态。 */
-typedef struct { char name[48]; bool zip; bool pad; } pkg_item_t;
+/* 一个分类包条目：包名（zip 去扩展名）+ 形态 + 子类型（STORY 列表区分 text/novel）。 */
+typedef struct { char name[48]; bool zip; bool pad; gc_cat_t sub; } pkg_item_t;
 
 /* UTF-8 安全截断（不劈开多字节序列）。 */
 static void utf8_trunc(char* s, size_t max) {
@@ -54,12 +55,35 @@ static void utf8_trunc(char* s, size_t max) {
 /* 包显示名：读 story.txt/script.txt 的标题行。兼容两代格式：
  *  - Story Engine v1（text-/novel-）："* title 标题"（取首条）。
  *  - 旧 avgr 格式："case id \"标题\""（最后一条生效，引擎同语义）。
+ *  - BBK 目录包：game.txt 首行整行即显示名（大资源目录无 story.txt）。
  * zip：从 .gcache/<名>/ 读（挂载过的包必然已解出；未挂载的首扫显示原名，
  * 进一次后即有标题）。目录包：直读 <目录>/ 下。
  * 栈预算（2026-10-26 真机爆栈修复）：主任务 8KB 栈内逐包调用，
  * path[256]+line[160]，单次 ≤450B。 */
 static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
     char path[256];
+    /* BBK 包：game.txt 首行 = 显示名（2026-10-30 真机"fmj"裸名修复）。
+     * v2.0.1 扩展到 zip 形态：扫描时 zip 已预解到 .gcache/<名>/，与目录
+     * 直挂同读取法——伏魔记从此 zip 原样拷入 games/ 即用，不再要求解压。 */
+    snprintf(path, sizeof(path), "%s/%s/game.txt",
+             it->zip ? GCACHE_ROOT : GAMES_ROOT, it->name);
+    {
+        FILE* gf = fopen(path, "r");
+        if (gf) {
+            char line[96];
+            if (fgets(line, sizeof(line), gf)) {
+                char* nl = strpbrk(line, "\r\n");
+                if (nl) *nl = 0;
+                if (line[0]) {
+                    fclose(gf);
+                    snprintf(out, cap, "%s", line);
+                    utf8_trunc(out, cap - 1);
+                    return;
+                }
+            }
+            fclose(gf);
+        }
+    }
     static const char* files[] = { "story.txt", "script.txt", "quiz.txt" };
     for (unsigned fi = 0; fi < sizeof(files) / sizeof(files[0]); ++fi) {
         if (it->zip) snprintf(path, sizeof(path), GCACHE_ROOT "/%s/%s", it->name, files[fi]);
@@ -100,13 +124,12 @@ static void pkg_display_name(const pkg_item_t* it, char* out, size_t cap) {
     snprintf(out, cap, "%s", it->name);
 }
 
-/* 收集分类包；稳定排序 zip 在前、目录在后（同前缀下 zip 优先，挂载确定）。 */
-static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
-    const char* prefix = gc_cat_prefix(cat);
+/* 收集一个前缀的包（大小写不敏感）；返回累加后的条目数。 */
+static int pkg_collect_prefix(const char* prefix, gc_cat_t sub,
+                              pkg_item_t* items, int n, int slots) {
     size_t plen = strlen(prefix);
-    int n = 0;
     DIR* d = opendir(GAMES_ROOT);
-    if (!d) return 0;
+    if (!d) return n;
     struct dirent* e;
     char full[256];   /* 循环外复用（2026-10-26 爆栈修复）：卡内路径 <200B，512B 浪费主任务栈 */
     while ((e = readdir(d)) != NULL && n < slots) {
@@ -122,9 +145,23 @@ static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
         char* dot = strstr(items[n].name, ".zip");
         if (is_zip && dot) *dot = 0;
         items[n].zip = is_zip;
+        items[n].sub = sub;
         ++n;
     }
     closedir(d);
+    return n;
+}
+
+/* 收集分类包；GC_CAT_STORY = 文绎合体列表（text- 与 novel- 两前缀合并，
+ * 2026-10-30 用户）。稳定排序 zip 在前、目录在后（同前缀下 zip 优先，挂载确定）。 */
+static int pkg_collect(gc_cat_t cat, pkg_item_t* items, int slots) {
+    int n = 0;
+    if (cat == GC_CAT_STORY) {
+        n = pkg_collect_prefix("text", GC_CAT_TEXT, items, n, slots);
+        n = pkg_collect_prefix("novel", GC_CAT_NOVEL, items, n, slots);
+    } else {
+        n = pkg_collect_prefix(gc_cat_prefix(cat), cat, items, n, slots);
+    }
     /* 插入排序：zip(...zip=true) 排在目录(false)前，保持各自原序稳定。 */
     for (int i = 1; i < n; ++i) {
         pkg_item_t key = items[i];
@@ -141,7 +178,8 @@ static bool cache_valid(const char* cache_dir, long zip_size);
 static void wipe_dir(const char* dir, int depth);
 static bool unzip_into(const char* zip_path, const char* dst_dir);
 
-int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots) {
+int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots,
+                gc_cat_t* kinds, int kind_slots) {
     ensure_dirs();
     if (!out || capacity < 8 || slots <= 0) return 0;
     if (slots > GC_PKG_SLOTS) slots = GC_PKG_SLOTS;
@@ -166,6 +204,7 @@ int gc_pkg_scan(gc_cat_t cat, char* out, size_t capacity, int slots) {
         pkg_display_name(&items[i], disp, sizeof(disp));
         utf8_trunc(disp, capacity - 1);
         snprintf(out + (size_t)i * capacity, capacity, "%s", disp);
+        if (kinds && i < kind_slots) kinds[i] = items[i].sub;   /* 文绎徽标用 */
     }
     return n;
 }
@@ -258,7 +297,8 @@ const char* gc_pkg_mount(gc_cat_t cat, int index) {
     if (index < 0 || index >= n) return NULL;
 
     const pkg_item_t* it = &items[index];
-    if (!it->zip) {                           /* 目录直挂：无缓存层。 */
+    s_mounted_kind = it->sub;            /* 文绎：子插件路由依据（mount 即记） */
+    if (!it->zip) {                       /* 目录直挂：无缓存层。 */
         snprintf(s_mounted_name, sizeof(s_mounted_name), "%s", it->name);
         snprintf(s_mounted_dir, sizeof(s_mounted_dir), GAMES_ROOT "/%s", it->name);
         return s_mounted_dir;
@@ -289,4 +329,7 @@ void gc_pkg_unmount(void) {
     /* 保留缓存目录（下次秒挂），只丢指针。 */
     s_mounted_name[0] = 0;
     s_mounted_dir[0] = 0;
+    s_mounted_kind = GC_CAT_TEXT;
 }
+
+gc_cat_t gc_pkg_mounted_kind(void) { return s_mounted_kind; }

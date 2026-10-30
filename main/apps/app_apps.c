@@ -2,16 +2,18 @@
  * 应用页（APPS）：固定 4 列 × 5 行图标架构（最多 20 格）。
  * RickyOS 风格圆角方 tile（112px / 圆角 28 / 3px 描边）+ 56px 线性图标 +
  * tile 下 12px 居中标签。排序规则（用户 2026-10-20 拍板）：
- * 所有新增应用排在推理游戏前，三个游戏图标保持在最后——
- * 首行：文件管理/传输文件/计算器/便签；第二行：番茄时钟/木鱼/推理/文字；步步高殿后。
+ * 所有新增应用排在推理游戏前，游戏图标保持在最后——
+ * 首行：文件管理/传输文件/计算器/便签；第二行：番茄时钟/木鱼/文绎；
+ * 第三行：习测/步步高游戏（2026-10-28 M5 回归：伏魔记横屏插件）。
  * 其余格子留空白（不加占位框），后续新应用按序插入游戏之前。
  * 微信读书 tile 已删（微信传书入口在传输文件页）。
  *
  * Fixed 4x5 icon grid (up to 20 cells), RickyOS-style 112 px tiles with 56 px
  * line icons and centered labels. New apps precede the games (user rule);
  * only real apps draw; empty cells stay blank. M2（2026-10-26 Story Engine）：
- * 推理/步步高入口移出（源码封存待 M5/M6 回归），改为双故事入口——
- * 「对话游戏」(text-*) 与「互动小说」(novel-*)，同一 story_kernel 内核。
+ * 推理/步步高入口移出（源码封存待 M5/M6 回归）。
+ * 2026-10-30 文绎（用户拍板）：对话游戏/互动小说双入口合并为「文绎」
+ * 一个 tile（story 合体插件：列表徽标区分，包内体验不变）。
  */
 #include <math.h>
 #include <stdio.h>
@@ -41,18 +43,18 @@ typedef struct {
 
 static const app_desc_t* page_files(void) { return app_at(4); }
 static const app_desc_t* page_calc(void) { return app_at(5); }
-extern const app_desc_t app_gtext;
-extern const app_desc_t app_gnovel;
+extern const app_desc_t app_gstory;
 extern const app_desc_t app_quiz;
+extern const app_desc_t app_gbbk;
 extern const app_desc_t app_notes;
 extern const app_desc_t app_pomodoro;
 extern const app_desc_t app_muyu;
-static const app_desc_t* page_gtext(void)  { return &app_gtext; }
-static const app_desc_t* page_gnovel(void) { return &app_gnovel; }
+static const app_desc_t* page_gstory(void)  { return &app_gstory; }
 static const app_desc_t* page_quiz(void)   { return &app_quiz; }
-static const app_desc_t* page_notes(void) { return &app_notes; }
+static const app_desc_t* page_gbbk(void)   { return &app_gbbk; }
+static const app_desc_t* page_notes(void)  { return &app_notes; }
 static const app_desc_t* page_pomodoro(void) { return &app_pomodoro; }
-static const app_desc_t* page_muyu(void) { return &app_muyu; }
+static const app_desc_t* page_muyu(void)   { return &app_muyu; }
 static const app_desc_t* page_transfer(void) {
     extern const app_desc_t app_transfer;
     return &app_transfer;
@@ -96,30 +98,23 @@ static void icon_calc(uint8_t* fb, int cx, int cy, uint8_t ink) {
     ui_fill_round_rect(fb, (EpdRect){body.x + 5, body.y + 26, 7, 7}, 2, ink);
 }
 
-static void icon_story(uint8_t* fb, int cx, int cy, uint8_t ink) {
-    /* 对话气泡：圆角框描边 + 左下尾巴 + 三个点（对话游戏入口）。 */
-    EpdRect body = {cx - 20, cy - 20, 40, 30};
-    ui_draw_round_rect(fb, body, 8, ink);
-    ui_draw_round_rect(fb, (EpdRect){body.x + 1, body.y + 1, body.width - 2, body.height - 2}, 7, ink);
-    nothing_thick_line(fb, cx - 10, cy + 11, cx - 4, cy + 21, 4, ink);
-    epd_fill_circle(cx - 10, cy - 5, 3, ink, fb);
-    epd_fill_circle(cx, cy - 5, 3, ink, fb);
-    epd_fill_circle(cx + 10, cy - 5, 3, ink, fb);
-}
-
-static void icon_novel(uint8_t* fb, int cx, int cy, uint8_t ink) {
-    /* 打开的书：中缝 + 两页弧边 + 每页三行文字（互动小说入口）。 */
-    nothing_thick_line(fb, cx, cy - 18, cx, cy + 18, 4, ink);
-    nothing_thick_line(fb, cx - 1, cy - 18, cx - 21, cy - 12, 4, ink);
-    nothing_thick_line(fb, cx - 21, cy - 12, cx - 21, cy + 14, 4, ink);
-    nothing_thick_line(fb, cx - 21, cy + 14, cx - 1, cy + 18, 4, ink);
-    nothing_thick_line(fb, cx + 1, cy - 18, cx + 21, cy - 12, 4, ink);
-    nothing_thick_line(fb, cx + 21, cy - 12, cx + 21, cy + 14, 4, ink);
-    nothing_thick_line(fb, cx + 21, cy + 14, cx + 1, cy + 18, 4, ink);
-    nothing_thick_line(fb, cx - 16, cy - 4, cx - 6, cy - 2, 3, ink);
-    nothing_thick_line(fb, cx - 16, cy + 4, cx - 6, cy + 6, 3, ink);
-    nothing_thick_line(fb, cx + 6, cy - 2, cx + 16, cy - 4, 3, ink);
-    nothing_thick_line(fb, cx + 6, cy + 6, cx + 16, cy + 4, 3, ink);
+static void icon_wenyi(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 文绎（2026-10-30 双入口合并）：上=对话气泡三点（对话游戏），
+     * 下=打开的书（互动小说）——两类故事合于一标。 */
+    EpdRect b = {cx - 14, cy - 24, 28, 18};
+    ui_draw_round_rect(fb, b, 6, ink);
+    epd_fill_circle(cx - 5, cy - 15, 2, ink, fb);
+    epd_fill_circle(cx, cy - 15, 2, ink, fb);
+    epd_fill_circle(cx + 5, cy - 15, 2, ink, fb);
+    nothing_thick_line(fb, cx - 4, cy - 6, cx - 4, cy, 3, ink);   /* 气泡尾 */
+    int by = cy + 10;                                             /* 打开的书 */
+    nothing_thick_line(fb, cx, by - 8, cx, by + 12, 3, ink);
+    nothing_thick_line(fb, cx - 1, by - 8, cx - 17, by - 3, 3, ink);
+    nothing_thick_line(fb, cx - 17, by - 3, cx - 17, by + 10, 3, ink);
+    nothing_thick_line(fb, cx - 17, by + 10, cx - 1, by + 12, 3, ink);
+    nothing_thick_line(fb, cx + 1, by - 8, cx + 17, by - 3, 3, ink);
+    nothing_thick_line(fb, cx + 17, by - 3, cx + 17, by + 10, 3, ink);
+    nothing_thick_line(fb, cx + 17, by + 10, cx + 1, by + 12, 3, ink);
 }
 
 static void icon_quiz(uint8_t* fb, int cx, int cy, uint8_t ink) {
@@ -167,6 +162,22 @@ static void icon_muyu(uint8_t* fb, int cx, int cy, uint8_t ink) {
     epd_fill_circle(cx + 20, cy + 21, 6, ink, fb);
 }
 
+static void icon_gbbk(uint8_t* fb, int cx, int cy, uint8_t ink) {
+    /* 掌机：圆角机身 + 双屏线 + 左下十字键 + 右下双圆钮（复古 RPG 语义）。 */
+    EpdRect body = {cx - 21, cy - 16, 42, 33};
+    ui_draw_round_rect(fb, body, 6, ink);
+    ui_draw_round_rect(fb, (EpdRect){body.x + 1, body.y + 1, body.width - 2, body.height - 2}, 5, ink);
+    nothing_thick_line(fb, cx - 13, cy - 9, cx + 13, cy - 9, 3, ink);
+    nothing_thick_line(fb, cx - 13, cy - 3, cx + 13, cy - 3, 3, ink);
+    nothing_thick_line(fb, cx - 13, cy + 3, cx - 6, cy + 3, 3, ink);
+    /* 十字键 */
+    nothing_thick_line(fb, cx - 12, cy + 6, cx - 12, cy + 12, 4, ink);
+    nothing_thick_line(fb, cx - 15, cy + 9, cx - 9, cy + 9, 4, ink);
+    /* 双圆钮 */
+    epd_fill_circle(cx + 13, cy + 7, 3, ink, fb);
+    epd_fill_circle(cx + 13, cy + 13, 3, ink, fb);
+}
+
 static const apps_entry_t k_entries[9] = {
     {"文件管理", icon_files, page_files, true},
     {"文件传输", icon_transfer, page_transfer, true},
@@ -174,9 +185,9 @@ static const apps_entry_t k_entries[9] = {
     {"便签", icon_notes, page_notes, true},
     {"番茄时钟", icon_pomodoro, page_pomodoro, true},
     {"木鱼", icon_muyu, page_muyu, true},
-    {"对话游戏", icon_story, page_gtext, true},
-    {"互动小说", icon_novel, page_gnovel, true},
+    {"文绎", icon_wenyi, page_gstory, true},
     {"习测", icon_quiz, page_quiz, true},
+    {"步步高游戏", icon_gbbk, page_gbbk, true},
 };
 
 static EpdRect cell_rect(int index) {
